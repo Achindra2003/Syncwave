@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SyncWave — Collaborative Editor</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            font-family: 'Inter', sans-serif;
+            background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+            padding: 40px 20px;
+            color: #e0e0e0;
+        }
+
+        .app {
+            width: 100%;
+            max-width: 900px;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .header h1 {
+            font-size: 2.4rem;
+            font-weight: 700;
+            background: linear-gradient(90deg, #00d2ff, #7a5cff, #ff6ec7);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 6px;
+        }
+
+        .header p {
+            font-size: 0.95rem;
+            color: #8888aa;
+        }
+
+        .status-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px 20px;
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 12px 12px 0 0;
+            backdrop-filter: blur(10px);
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.85rem;
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #ff4444;
+            animation: pulse 2s infinite;
+        }
+
+        .status-dot.connected {
+            background: #00ff88;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+
+        .user-badge {
+            background: linear-gradient(135deg, #7a5cff, #00d2ff);
+            padding: 4px 14px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            color: white;
+        }
+
+        .editor-container {
+            position: relative;
+            border: 1px solid rgba(255,255,255,0.08);
+            border-top: none;
+            border-radius: 0 0 12px 12px;
+            overflow: hidden;
+        }
+
+        #editor {
+            width: 100%;
+            min-height: 450px;
+            padding: 24px;
+            background: rgba(15, 12, 30, 0.8);
+            color: #e8e8f0;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 15px;
+            line-height: 1.7;
+            border: none;
+            outline: none;
+            resize: vertical;
+            backdrop-filter: blur(20px);
+        }
+
+        #editor::placeholder {
+            color: #555577;
+        }
+
+        .activity-log {
+            margin-top: 20px;
+            padding: 16px 20px;
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.06);
+            border-radius: 12px;
+            max-height: 180px;
+            overflow-y: auto;
+        }
+
+        .activity-log h3 {
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            color: #7a5cff;
+            margin-bottom: 10px;
+        }
+
+        .log-entry {
+            font-size: 0.82rem;
+            color: #8888aa;
+            padding: 3px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.03);
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .log-entry .sender {
+            color: #00d2ff;
+            font-weight: 600;
+        }
+    </style>
+</head>
+<body>
+    <div class="app">
+        <div class="header">
+            <h1>SyncWave</h1>
+            <p>Real-Time Distributed Collaborative Editor — Powered by CRDTs</p>
+        </div>
+
+        <div class="status-bar">
+            <div class="status-indicator">
+                <div class="status-dot" id="statusDot"></div>
+                <span id="statusText">Connecting...</span>
+            </div>
+            <div class="user-badge" id="userBadge">—</div>
+        </div>
+
+        <div class="editor-container">
+            <textarea id="editor" placeholder="Start typing here... Open another tab to collaborate in real-time!"></textarea>
+        </div>
+
+        <div class="activity-log">
+            <h3>Activity Feed</h3>
+            <div id="logContainer"></div>
+        </div>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>
