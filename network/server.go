@@ -285,6 +285,28 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 		h.mu.Lock()
 
 		switch msg.Type {
+		case "restore":
+			// Client wants to restore the document after a server restart.
+			// Only the first restorer populates the empty doc; others get the current state.
+			if h.doc.Len() == 0 && len(msg.Content) > 0 {
+				runes := []rune(msg.Content)
+				for i, ch := range runes {
+					h.clock++
+					newID := core.OpID{Clock: h.clock, SiteID: user.ID}
+					anchor := core.RootID
+					if i > 0 {
+						anchor = core.OpID{Clock: h.clock - 1, SiteID: user.ID}
+					}
+					h.doc.Insert(ch, anchor, newID)
+				}
+				fmt.Printf("[HUB] %s restored doc (%d chars)\n", user.Name, h.doc.Len())
+			} else {
+				fmt.Printf("[HUB] %s restore skipped (doc already has %d chars)\n", user.Name, h.doc.Len())
+			}
+			// Always respond with current state so client can merge
+			syncMsg := h.buildFullSync(user.Color)
+			ws.WriteJSON(syncMsg)
+
 		case "batch_sync":
 			// Client is replaying buffered offline ops
 			var ops []Message

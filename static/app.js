@@ -59,12 +59,12 @@
     // Three-way merge: given a common base, our local text, and the server text,
     // produce a merged result that keeps BOTH sets of changes.
     function mergeTexts(base, local, server) {
-        // If server is empty (restart) and we have content, restore our full text
-        if (server.length === 0 && local.length > 0) return local;
         // If no base (first connect), just accept the server
         if (!base) return server;
-        // If we didn't change anything, accept server
+        // If we didn't change anything offline, accept server
         if (base === local) return server;
+        // If server already contains our text (we were the restorer), nothing to merge
+        if (local === server) return server;
 
         // Find what WE changed relative to the base
         var prefix = 0;
@@ -219,6 +219,7 @@
             }
             connected = false;
             wasDisconnected = true;
+            pendingRestore = false; // Reset in case we were waiting
             setConnectionStatus("offline");
             addLog("System", "Connection lost — edits saved locally");
             scheduleReconnect();
@@ -244,21 +245,68 @@
                     var localText = editor.value;
                     myColor = msg.color || myColor;
 
-                    // Check if we have offline edits that need merging
+                    // ---- RESTORE RESPONSE ----
+                    // If we sent a 'restore' message, this full_sync is the server's
+                    // response (now with real content). Do a normal merge against it.
+                    if (pendingRestore) {
+                        pendingRestore = false;
+                        var merged = mergeTexts(lastSyncedContent, localText, serverContent);
+                        rebuildShadow(serverContent, msg.nodeIDs || []);
+                        offlineBuffer = [];
+
+                        if (merged !== serverContent) {
+                            var freshOps = diffToOps(serverContent, merged, merged.length);
+                            if (freshOps.length > 0) {
+                                editor.value = merged;
+                                oldValue = merged;
+                                addLog("System", "Merging offline additions...");
+                                ws.send(JSON.stringify({
+                                    type: "batch_sync",
+                                    content: JSON.stringify(freshOps)
+                                }));
+                            } else {
+                                editor.value = serverContent;
+                                oldValue = serverContent;
+                            }
+                        } else {
+                            editor.value = serverContent;
+                            oldValue = serverContent;
+                        }
+
+                        wasDisconnected = false;
+                        lastSyncedContent = editor.value;
+                        editor.selectionStart = editor.selectionEnd = Math.min(savedCursor, editor.value.length);
+                        updateCharCount();
+                        addLog("System", "Document restored (" + editor.value.length + " chars)");
+                        isRemoteUpdate = false;
+                        break;
+                    }
+
+                    // ---- CHECK FOR OFFLINE EDITS ----
                     var hasOfflineEdits = wasDisconnected &&
                         lastSyncedContent !== null &&
                         localText !== lastSyncedContent &&
                         localText.length > 0;
 
+                    // ---- SERVER RESTART (empty doc) ----
+                    // Send a 'restore' message so the server gets ONE authoritative copy.
+                    // Other tabs that also see empty will get the restored content when
+                    // their 'restore' response arrives (first restorer wins on server).
+                    if (hasOfflineEdits && serverContent.length === 0) {
+                        pendingRestore = true;
+                        ws.send(JSON.stringify({
+                            type: "restore",
+                            content: localText
+                        }));
+                        addLog("System", "Restoring document to server...");
+                        isRemoteUpdate = false;
+                        break;
+                    }
+
+                    // ---- NORMAL MERGE ----
                     if (hasOfflineEdits) {
-                        // THREE-WAY MERGE: combine server changes with our offline changes
                         var merged = mergeTexts(lastSyncedContent, localText, serverContent);
-
-                        // Rebuild shadow from server state (real node IDs)
                         rebuildShadow(serverContent, msg.nodeIDs || []);
-
-                        // Generate fresh ops: diff(serverContent → merged) with correct anchors
-                        // Discard the stale offlineBuffer — its anchor IDs are invalid
                         offlineBuffer = [];
                         var freshOps = diffToOps(serverContent, merged, merged.length);
 
@@ -291,6 +339,9 @@
                     break;
 
                 case "insert":
+                    // During pending restore, ignore remote ops — the restore's
+                    // full_sync response will have the complete state.
+                    if (pendingRestore) break;
                     if (msg.userID === userID) {
                         // Our own op confirmed by server — update shadow with server-assigned ID.
                         // Ops are confirmed in FIFO order, so the first placeholder (clock < 0)
@@ -331,6 +382,7 @@
                     break;
 
                 case "delete":
+                    if (pendingRestore) break;
                     if (msg.userID === userID) {
                         // Our own delete confirmed — shadow was already updated in diffToOps.
                         break;
