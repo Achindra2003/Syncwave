@@ -197,6 +197,7 @@
             connected = true;
             reconnectAttempts = 0;
             setConnectionStatus("online");
+            startHealthCheck();
 
             // Only send the join. Offline batch_sync is deferred until AFTER we receive
             // the server's full_sync — otherwise we race and the initial full_sync can
@@ -228,6 +229,7 @@
         ws.onerror = function() {};
 
         ws.onmessage = function(event) {
+            lastMessageTime = Date.now();
             var msg;
             try {
                 msg = JSON.parse(event.data);
@@ -438,7 +440,36 @@
         };
     }
 
+    // --- Client-side connection health check ---
+    // Browsers auto-respond to WebSocket pings, but we also periodically
+    // verify the connection is alive from our end for quick recovery.
+    let healthCheckTimer = null;
+    let lastMessageTime = 0;
+
+    function startHealthCheck() {
+        stopHealthCheck();
+        lastMessageTime = Date.now();
+        healthCheckTimer = setInterval(function() {
+            if (!connected || !ws || ws.readyState !== WebSocket.OPEN) return;
+            // If we haven't received ANY message from the server in 70s,
+            // the connection is likely dead (server pings every ~54s).
+            if (Date.now() - lastMessageTime > 70000) {
+                console.log("[SyncWave] No server activity for 70s, reconnecting...");
+                addLog("System", "Connection stale — reconnecting...");
+                ws.close();
+            }
+        }, 15000);
+    }
+
+    function stopHealthCheck() {
+        if (healthCheckTimer) {
+            clearInterval(healthCheckTimer);
+            healthCheckTimer = null;
+        }
+    }
+
     function scheduleReconnect() {
+        stopHealthCheck();
         if (reconnectTimer) clearTimeout(reconnectTimer);
         reconnectAttempts++;
         var delay = Math.min(1000 * Math.pow(2, reconnectAttempts - 1), 30000);

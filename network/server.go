@@ -12,26 +12,43 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+const (
+	// Time allowed to write a message to the peer.
+	writeWait = 10 * time.Second
+
+	// Time allowed to read the next pong message from the peer.
+	pongWait = 60 * time.Second
+
+	// Send pings to peer with this period. Must be less than pongWait.
+	pingPeriod = (pongWait * 9) / 10
+
+	// Maximum message size allowed from peer.
+	maxMessageSize = 512 * 1024
+
+	// Send channel buffer size per client.
+	sendBufSize = 256
+)
+
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
 // Message is the JSON protocol.
 type Message struct {
-	Type     string     `json:"type"`
-	Char     int        `json:"char,omitempty"`
-	Position int        `json:"position"`
-	UserID   string     `json:"userID,omitempty"`
-	UserName string     `json:"userName,omitempty"`
-	Color    string     `json:"color,omitempty"`
-	Content  string     `json:"content,omitempty"`
-	Users    []User     `json:"users,omitempty"`
-	Seq      int        `json:"seq,omitempty"`
-	LastSeq  int        `json:"lastSeq,omitempty"`
-	AnchorID *core.OpID `json:"anchorID,omitempty"` // Insert: character to insert after
-	TargetID *core.OpID `json:"targetID,omitempty"` // Delete: character to tombstone
-	NewID    *core.OpID `json:"newID,omitempty"`    // Server-assigned OpID for inserts
-	NodeIDs  []core.OpID `json:"nodeIDs,omitempty"` // full_sync: ordered visible node IDs
+	Type     string      `json:"type"`
+	Char     int         `json:"char,omitempty"`
+	Position int         `json:"position"`
+	UserID   string      `json:"userID,omitempty"`
+	UserName string      `json:"userName,omitempty"`
+	Color    string      `json:"color,omitempty"`
+	Content  string      `json:"content,omitempty"`
+	Users    []User      `json:"users,omitempty"`
+	Seq      int         `json:"seq,omitempty"`
+	LastSeq  int         `json:"lastSeq,omitempty"`
+	AnchorID *core.OpID  `json:"anchorID,omitempty"` // Insert: character to insert after
+	TargetID *core.OpID  `json:"targetID,omitempty"` // Delete: character to tombstone
+	NewID    *core.OpID  `json:"newID,omitempty"`    // Server-assigned OpID for inserts
+	NodeIDs  []core.OpID `json:"nodeIDs,omitempty"`  // full_sync: ordered visible node IDs
 }
 
 type User struct {
@@ -40,9 +57,13 @@ type User struct {
 	Color string `json:"color"`
 }
 
+// ClientConn wraps a WebSocket connection with a buffered send channel.
+// All writes go through the send channel and are serialized by writePump.
 type ClientConn struct {
-	Conn *websocket.Conn
-	User User
+	hub  *Hub
+	conn *websocket.Conn
+	user User
+	send chan []byte
 }
 
 // LogEntry is a recorded operation for replay.
@@ -86,39 +107,44 @@ func (h *Hub) assignColor() string {
 func (h *Hub) getUsers() []User {
 	users := []User{}
 	for _, cc := range h.clients {
-		users = append(users, cc.User)
+		users = append(users, cc.user)
 	}
 	return users
+}
+
+// safeSend pushes a message to a client's send channel without blocking.
+// Returns false if the channel is full (client too slow / dead).
+func (cc *ClientConn) safeSend(msg []byte) bool {
+	select {
+	case cc.send <- msg:
+		return true
+	default:
+		return false
+	}
 }
 
 func (h *Hub) broadcastPresence() {
 	users := h.getUsers()
 	msg := Message{Type: "presence", Users: users}
 	raw, _ := json.Marshal(msg)
-	for ws := range h.clients {
-		ws.WriteMessage(websocket.TextMessage, raw)
+	for _, cc := range h.clients {
+		cc.safeSend(raw)
 	}
 }
 
 func (h *Hub) broadcastExcept(raw []byte, sender *websocket.Conn) {
-	for ws := range h.clients {
+	for ws, cc := range h.clients {
 		if ws == sender {
 			continue
 		}
-		if err := ws.WriteMessage(websocket.TextMessage, raw); err != nil {
-			ws.Close()
-			delete(h.clients, ws)
-		}
+		cc.safeSend(raw)
 	}
 }
 
 // broadcastAll sends to ALL clients including sender.
 func (h *Hub) broadcastAll(raw []byte) {
-	for ws := range h.clients {
-		if err := ws.WriteMessage(websocket.TextMessage, raw); err != nil {
-			ws.Close()
-			delete(h.clients, ws)
-		}
+	for _, cc := range h.clients {
+		cc.safeSend(raw)
 	}
 }
 
@@ -209,70 +235,62 @@ func (h *Hub) buildFullSync(color string) Message {
 	}
 }
 
-func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
-	ws, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		fmt.Println("[HUB] Upgrade error:", err)
-		return
-	}
-
-	// Read join message
-	var joinMsg Message
-	if err := ws.ReadJSON(&joinMsg); err != nil {
-		ws.Close()
-		return
-	}
-
-	h.mu.Lock()
-
-	user := User{
-		ID:    joinMsg.UserID,
-		Name:  joinMsg.UserName,
-		Color: h.assignColor(),
-	}
-	h.clients[ws] = &ClientConn{Conn: ws, User: user}
-
-	isReconnect := joinMsg.LastSeq > 0
-
-	if isReconnect {
-		// RECONNECT: Send full doc + missed ops
-		fmt.Printf("[HUB] %s reconnected (lastSeq=%d, current=%d)\n", user.Name, joinMsg.LastSeq, h.seqNum)
-
-		syncMsg := h.buildFullSync(user.Color)
-		ws.WriteJSON(syncMsg)
-
-		// Then send missed ops so client can see what others did
-		missedCount := 0
-		for _, entry := range h.opLog {
-			if entry.Seq > joinMsg.LastSeq && entry.Msg.UserID != user.ID {
-				raw, _ := json.Marshal(entry.Msg)
-				ws.WriteMessage(websocket.TextMessage, raw)
-				missedCount++
+// writePump pumps messages from the send channel to the WebSocket connection.
+// A single goroutine runs writePump for each connection, ensuring all writes
+// are serialized (gorilla/websocket does not support concurrent writers).
+// It also sends periodic pings to keep the connection alive through proxies.
+func (cc *ClientConn) writePump() {
+	ticker := time.NewTicker(pingPeriod)
+	defer func() {
+		ticker.Stop()
+		cc.conn.Close()
+	}()
+	for {
+		select {
+		case msg, ok := <-cc.send:
+			cc.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if !ok {
+				// Hub closed the channel — send a close frame and exit.
+				cc.conn.WriteMessage(websocket.CloseMessage, []byte{})
+				return
+			}
+			if err := cc.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
+				return
+			}
+		case <-ticker.C:
+			cc.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if err := cc.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
 			}
 		}
-		fmt.Printf("[HUB] Sent %d missed ops to %s\n", missedCount, user.Name)
-	} else {
-		// FIRST CONNECT: Send full document
-		syncMsg := h.buildFullSync(user.Color)
-		ws.WriteJSON(syncMsg)
-		fmt.Printf("[HUB] %s joined (%d users)\n", user.Name, len(h.clients))
 	}
+}
 
-	h.broadcastPresence()
-	h.mu.Unlock()
+// readPump reads messages from the WebSocket connection and dispatches them.
+// It runs in the ServeWS goroutine (one per connection).
+func (cc *ClientConn) readPump() {
+	h := cc.hub
+	user := cc.user
 
 	defer func() {
 		h.mu.Lock()
-		delete(h.clients, ws)
+		delete(h.clients, cc.conn)
 		fmt.Printf("[HUB] %s left (%d users)\n", user.Name, len(h.clients))
 		h.broadcastPresence()
 		h.mu.Unlock()
-		ws.Close()
+		close(cc.send) // signals writePump to exit
+		cc.conn.Close()
 	}()
 
-	// Message loop
+	cc.conn.SetReadLimit(maxMessageSize)
+	cc.conn.SetReadDeadline(time.Now().Add(pongWait))
+	cc.conn.SetPongHandler(func(string) error {
+		cc.conn.SetReadDeadline(time.Now().Add(pongWait))
+		return nil
+	})
+
 	for {
-		_, raw, err := ws.ReadMessage()
+		_, raw, err := cc.conn.ReadMessage()
 		if err != nil {
 			break
 		}
@@ -305,7 +323,8 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 			}
 			// Always respond with current state so client can merge
 			syncMsg := h.buildFullSync(user.Color)
-			ws.WriteJSON(syncMsg)
+			syncRaw, _ := json.Marshal(syncMsg)
+			cc.safeSend(syncRaw)
 
 		case "batch_sync":
 			// Client is replaying buffered offline ops
@@ -315,10 +334,10 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 				for i := range ops {
 					h.applyOp(&ops[i], user)
 					outRaw, _ := json.Marshal(ops[i])
-					// Confirm to sender (same as normal ops) so placeholder IDs get replaced
-					ws.WriteMessage(websocket.TextMessage, outRaw)
+					// Confirm to sender so placeholder IDs get replaced
+					cc.safeSend(outRaw)
 					// Broadcast to other clients
-					h.broadcastExcept(outRaw, ws)
+					h.broadcastExcept(outRaw, cc.conn)
 				}
 				fmt.Printf("[HUB] %s batch complete, doc len=%d\n", user.Name, h.doc.Len())
 			}
@@ -327,9 +346,9 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 			h.applyOp(&msg, user)
 			outRaw, _ := json.Marshal(msg)
 			// Send confirmation to sender (with server-assigned newID/targetID)
-			ws.WriteMessage(websocket.TextMessage, outRaw)
+			cc.safeSend(outRaw)
 			// Broadcast to all other clients
-			h.broadcastExcept(outRaw, ws)
+			h.broadcastExcept(outRaw, cc.conn)
 
 		case "cursor":
 			// Cursor messages: just broadcast to others, no CRDT mutation
@@ -337,11 +356,80 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 			msg.UserName = user.Name
 			msg.Color = user.Color
 			outRaw, _ := json.Marshal(msg)
-			h.broadcastExcept(outRaw, ws)
+			h.broadcastExcept(outRaw, cc.conn)
 		}
 
 		h.mu.Unlock()
 	}
+}
+
+func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
+	ws, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		fmt.Println("[HUB] Upgrade error:", err)
+		return
+	}
+
+	// Read join message before starting pumps
+	var joinMsg Message
+	if err := ws.ReadJSON(&joinMsg); err != nil {
+		ws.Close()
+		return
+	}
+
+	h.mu.Lock()
+
+	user := User{
+		ID:    joinMsg.UserID,
+		Name:  joinMsg.UserName,
+		Color: h.assignColor(),
+	}
+
+	cc := &ClientConn{
+		hub:  h,
+		conn: ws,
+		user: user,
+		send: make(chan []byte, sendBufSize),
+	}
+	h.clients[ws] = cc
+
+	isReconnect := joinMsg.LastSeq > 0
+
+	if isReconnect {
+		// RECONNECT: Send full doc + missed ops via channel
+		fmt.Printf("[HUB] %s reconnected (lastSeq=%d, current=%d)\n", user.Name, joinMsg.LastSeq, h.seqNum)
+
+		syncMsg := h.buildFullSync(user.Color)
+		syncRaw, _ := json.Marshal(syncMsg)
+		cc.safeSend(syncRaw)
+
+		// Then send missed ops so client can see what others did
+		missedCount := 0
+		for _, entry := range h.opLog {
+			if entry.Seq > joinMsg.LastSeq && entry.Msg.UserID != user.ID {
+				raw, _ := json.Marshal(entry.Msg)
+				cc.safeSend(raw)
+				missedCount++
+			}
+		}
+		fmt.Printf("[HUB] Sent %d missed ops to %s\n", missedCount, user.Name)
+	} else {
+		// FIRST CONNECT: Send full document via channel
+		syncMsg := h.buildFullSync(user.Color)
+		syncRaw, _ := json.Marshal(syncMsg)
+		cc.safeSend(syncRaw)
+		fmt.Printf("[HUB] %s joined (%d users)\n", user.Name, len(h.clients))
+	}
+
+	h.broadcastPresence()
+	h.mu.Unlock()
+
+	// Start the write pump in a separate goroutine — it handles
+	// all writes including pings, keeping the connection alive.
+	go cc.writePump()
+
+	// Read pump runs in this goroutine (blocks until connection closes)
+	cc.readPump()
 }
 
 func (h *Hub) ServeStats(w http.ResponseWriter, r *http.Request) {
