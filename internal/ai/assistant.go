@@ -1,3 +1,6 @@
+// Package ai provides an LLM-powered text completion assistant using
+// the Groq API (OpenAI-compatible). It streams completion tokens as
+// they are generated, allowing real-time ghost-text suggestions in the editor.
 package ai
 
 import (
@@ -9,6 +12,7 @@ import (
 	"github.com/tmc/langchaingo/llms/openai"
 )
 
+// Assistant wraps the LLM client and provides streaming text completion.
 type Assistant struct {
 	llm        *openai.LLM
 	model      string
@@ -16,11 +20,13 @@ type Assistant struct {
 	timeout    time.Duration
 }
 
+// StreamResult carries a single streamed token or an error.
 type StreamResult struct {
 	Token string
 	Error error
 }
 
+// NewAssistant creates a new AI assistant connected to the Groq API.
 func NewAssistant(apiKey string) (*Assistant, error) {
 	llm, err := openai.New(
 		openai.WithToken(apiKey),
@@ -39,6 +45,8 @@ func NewAssistant(apiKey string) (*Assistant, error) {
 	}, nil
 }
 
+// StreamComplete returns a channel of tokens that complete the text at the cursor.
+// textBefore and textAfter provide context around the cursor position.
 func (a *Assistant) StreamComplete(ctx context.Context, textBefore, textAfter string) <-chan StreamResult {
 	resultChan := make(chan StreamResult, 100)
 
@@ -55,8 +63,7 @@ func (a *Assistant) StreamComplete(ctx context.Context, textBefore, textAfter st
 				llms.TextParts(llms.ChatMessageTypeHuman, prompt),
 			},
 			llms.WithStreamingFunc(func(ctx context.Context, chunk []byte) error {
-				token := string(chunk)
-				resultChan <- StreamResult{Token: token}
+				resultChan <- StreamResult{Token: string(chunk)}
 				return nil
 			}),
 		)

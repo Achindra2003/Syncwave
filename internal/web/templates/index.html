@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SyncWave — Collaborative Editor</title>
+    <meta name="description" content="Real-time collaborative document editor powered by CRDT and AI">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <!-- Name Entry Modal -->
+    <div class="name-modal" id="nameModal">
+        <div class="name-card">
+            <h2>SyncWave</h2>
+            <p>Enter your name to start collaborating</p>
+            <input type="text" id="nameInput" placeholder="Your name..." maxlength="20" autofocus />
+            <button id="nameSubmit">Start Editing</button>
+        </div>
+    </div>
+
+    <div class="topbar">
+        <div class="topbar-left">
+            <div class="logo">SyncWave</div>
+            <input class="doc-title" id="docTitle" value="Untitled Document" />
+        </div>
+        <div class="topbar-right">
+            <div class="avatars" id="avatars"></div>
+            <div class="status-pill">
+                <div class="status-dot" id="statusDot"></div>
+                <span id="statusText">Connecting...</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="toolbar">
+        <span class="toolbar-info" id="toolbarInfo">CRDT + AI</span>
+        <div class="ai-badge" id="aiBadge">✨ AI Ready</div>
+    </div>
+
+    <div class="offline-banner" id="offlineBanner">
+        ⚡ Offline Mode — Edits are saved locally and will sync when reconnected
+    </div>
+
+    <div class="editor-wrap">
+        <div class="page">
+            <div id="editor-host">
+                <textarea id="editor" placeholder="Start typing... AI suggestions appear as grey text (press Tab to accept).&#10;&#10;Open another browser tab to collaborate in real time!"></textarea>
+                <div id="ghost-text"></div>
+                <div id="cursors-overlay"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="bottombar">
+        <div class="shortcuts">
+            <span><kbd>Tab</kbd> Accept AI suggestion</span>
+            <span><kbd>Esc</kbd> Dismiss</span>
+        </div>
+        <span id="charCount">0 chars</span>
+        <span>SyncWave — CRDT + AI</span>
+    </div>
+
+    <button class="activity-toggle" id="activityBtn" title="Activity Feed">💬</button>
+    <div class="activity-panel" id="activityPanel">
+        <h4>Activity Feed</h4>
+        <div id="logContainer"></div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

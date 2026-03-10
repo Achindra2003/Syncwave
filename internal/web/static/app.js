@@ -1,28 +1,30 @@
 // === SyncWave Client: CRDT Shadow + Collaboration + AI + Offline Sync ===
 
 (function() {
-    const editor = document.getElementById("editor");
-    const ghostText = document.getElementById("ghost-text");
-    const statusDot = document.getElementById("statusDot");
-    const statusText = document.getElementById("statusText");
-    const avatarsDiv = document.getElementById("avatars");
-    const logContainer = document.getElementById("logContainer");
-    const charCountEl = document.getElementById("charCount");
-    const activityBtn = document.getElementById("activityBtn");
-    const activityPanel = document.getElementById("activityPanel");
-    const aiBadge = document.getElementById("aiBadge");
-    const offlineBanner = document.getElementById("offlineBanner");
-    const cursorsOverlay = document.getElementById("cursors-overlay");
-    const nameModal = document.getElementById("nameModal");
-    const nameInput = document.getElementById("nameInput");
-    const nameSubmit = document.getElementById("nameSubmit");
+    "use strict";
+
+    var editor = document.getElementById("editor");
+    var ghostText = document.getElementById("ghost-text");
+    var statusDot = document.getElementById("statusDot");
+    var statusText = document.getElementById("statusText");
+    var avatarsDiv = document.getElementById("avatars");
+    var logContainer = document.getElementById("logContainer");
+    var charCountEl = document.getElementById("charCount");
+    var activityBtn = document.getElementById("activityBtn");
+    var activityPanel = document.getElementById("activityPanel");
+    var aiBadge = document.getElementById("aiBadge");
+    var offlineBanner = document.getElementById("offlineBanner");
+    var cursorsOverlay = document.getElementById("cursors-overlay");
+    var nameModal = document.getElementById("nameModal");
+    var nameInput = document.getElementById("nameInput");
+    var nameSubmit = document.getElementById("nameSubmit");
 
     // --- Identity ---
-    const userID = "U-" + Math.random().toString(36).substring(2, 6).toUpperCase();
-    let userName = "Anonymous";
-    let myColor = "#7a5cff";
-    let isRemoteUpdate = false;
-    let started = false;
+    var userID = "U-" + Math.random().toString(36).substring(2, 6).toUpperCase();
+    var userName = "Anonymous";
+    var myColor = "#7a5cff";
+    var isRemoteUpdate = false;
+    var started = false;
 
     // --- Name Modal ---
     function submitName() {
@@ -38,35 +40,64 @@
     });
 
     // --- Connection State ---
-    let ws = null;
-    let connected = false;
-    let lastSeq = 0;
-    let offlineBuffer = [];
-    let reconnectAttempts = 0;
-    let reconnectTimer = null;
+    var ws = null;
+    var connected = false;
+    var lastSeq = 0;
+    var offlineBuffer = [];
+    var reconnectAttempts = 0;
+    var reconnectTimer = null;
+    var pendingRestore = false;
+
     // The editor content at the moment of last disconnect — used as the "base"
     // for three-way merge when reconnecting with offline edits.
-    let lastSyncedContent = null;
-    let wasDisconnected = false;
+    var lastSyncedContent = null;
+    var wasDisconnected = false;
 
     // --- Local CRDT Shadow ---
     // Ordered array of { id: {clock, siteID}, char: string }
     // Mirrors the server's visible document state for position<->OpID mapping.
-    let shadow = [];
-    let placeholderCounter = 0; // Monotonic counter for unique placeholder IDs
-    const ROOT_ID = { clock: 0, siteID: "ROOT" };
+    var shadow = [];
+    var placeholderCounter = 0;
+    var ROOT_ID = { clock: 0, siteID: "ROOT" };
 
-    // Three-way merge: given a common base, our local text, and the server text,
-    // produce a merged result that keeps BOTH sets of changes.
+    // --- Client-side health check ---
+    var healthCheckTimer = null;
+    var lastMessageTime = 0;
+    var appPingTimer = null;
+
+    function startHealthCheck() {
+        stopHealthCheck();
+        lastMessageTime = Date.now();
+
+        // Application-level ping every 25s (belt-and-suspenders with WS pings)
+        appPingTimer = setInterval(function() {
+            if (connected && ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: "ping" }));
+            }
+        }, 25000);
+
+        // If no message from server in 70s, force reconnect
+        healthCheckTimer = setInterval(function() {
+            if (!connected || !ws || ws.readyState !== WebSocket.OPEN) return;
+            if (Date.now() - lastMessageTime > 70000) {
+                console.log("[SyncWave] No server activity for 70s, reconnecting...");
+                addLog("System", "Connection stale — reconnecting...");
+                ws.close();
+            }
+        }, 15000);
+    }
+
+    function stopHealthCheck() {
+        if (healthCheckTimer) { clearInterval(healthCheckTimer); healthCheckTimer = null; }
+        if (appPingTimer) { clearInterval(appPingTimer); appPingTimer = null; }
+    }
+
+    // --- Three-way merge ---
     function mergeTexts(base, local, server) {
-        // If no base (first connect), just accept the server
         if (!base) return server;
-        // If we didn't change anything offline, accept server
         if (base === local) return server;
-        // If server already contains our text (we were the restorer), nothing to merge
         if (local === server) return server;
 
-        // Find what WE changed relative to the base
         var prefix = 0;
         var min1 = Math.min(base.length, local.length);
         while (prefix < min1 && base.charAt(prefix) === local.charAt(prefix)) prefix++;
@@ -79,10 +110,8 @@
         }
 
         var ourInserted = local.substring(prefix, local.length - suffix);
-        // If nothing was inserted, accept server as-is
         if (ourInserted.length === 0) return server;
 
-        // Find common regions between base and server to map our insertion point
         var sharedPrefix = 0;
         var min2 = Math.min(base.length, server.length);
         while (sharedPrefix < min2 && base.charAt(sharedPrefix) === server.charAt(sharedPrefix)) {
@@ -96,24 +125,19 @@
             sharedSuffix++;
         }
 
-        // Map our insertion position (in base coordinates) to server coordinates.
-        // Base has 3 regions: [0,sharedPrefix) [sharedPrefix, base.len-sharedSuffix) [base.len-sharedSuffix, base.len)
-        // Server:            [0,sharedPrefix) [sharedPrefix, server.len-sharedSuffix) [server.len-sharedSuffix, server.len)
         var insertPos;
         if (prefix < sharedPrefix) {
-            // Our change is in the shared prefix → same position in server
             insertPos = prefix;
         } else if (prefix >= base.length - sharedSuffix) {
-            // Our change is in the shared suffix → offset into server's suffix
             insertPos = (server.length - sharedSuffix) + (prefix - (base.length - sharedSuffix));
         } else {
-            // Our change is in the divergent region → place after server's changes
             insertPos = server.length - sharedSuffix;
         }
 
         return server.substring(0, insertPos) + ourInserted + server.substring(insertPos);
     }
 
+    // --- Shadow CRDT helpers ---
     function shadowIDAtPos(pos) {
         if (pos < 0 || pos >= shadow.length) return ROOT_ID;
         return shadow[pos].id;
@@ -153,7 +177,6 @@
                 });
             }
         } else {
-            // Fallback: no nodeIDs, build with placeholder IDs
             for (var j = 0; j < content.length; j++) {
                 shadow.push({
                     id: { clock: -(j + 1), siteID: "UNKNOWN" },
@@ -166,15 +189,15 @@
     // --- AI State ---
     var AI_DEBOUNCE_MS = 800;
     var AI_MIN_LENGTH = 10;
-    let aiDebounceTimer = null;
-    let currentSuggestion = "";
-    let suggestionCursorPos = -1; // Cursor position when suggestion was requested
+    var aiDebounceTimer = null;
+    var currentSuggestion = "";
+    var suggestionCursorPos = -1;
 
     // --- Remote Cursors ---
-    let remoteCursors = {}; // userID -> { position, userName, color }
+    var remoteCursors = {};
 
-    // --- Old Value Tracking for Input Diffing ---
-    let oldValue = "";
+    // --- Old Value Tracking ---
+    var oldValue = "";
 
     // --- Activity Panel ---
     activityBtn.addEventListener("click", function() {
@@ -199,9 +222,6 @@
             setConnectionStatus("online");
             startHealthCheck();
 
-            // Only send the join. Offline batch_sync is deferred until AFTER we receive
-            // the server's full_sync — otherwise we race and the initial full_sync can
-            // overwrite the merged result.
             ws.send(JSON.stringify({
                 type: "join",
                 userID: userID,
@@ -211,17 +231,14 @@
         };
 
         ws.onclose = function() {
-            // Only snapshot on the FIRST disconnect (connected→disconnected),
-            // not on retry failures. Otherwise retry onclose events overwrite
-            // lastSyncedContent with the current (offline-edited) text, making
-            // the three-way merge think nothing changed.
             if (connected) {
                 lastSyncedContent = editor.value;
             }
             connected = false;
             wasDisconnected = true;
-            pendingRestore = false; // Reset in case we were waiting
+            pendingRestore = false;
             setConnectionStatus("offline");
+            stopHealthCheck();
             addLog("System", "Connection lost — edits saved locally");
             scheduleReconnect();
         };
@@ -230,12 +247,12 @@
 
         ws.onmessage = function(event) {
             lastMessageTime = Date.now();
+
             var msg;
-            try {
-                msg = JSON.parse(event.data);
-            } catch(e) {
-                return;
-            }
+            try { msg = JSON.parse(event.data); } catch(e) { return; }
+
+            // Application-level pong — no action needed, lastMessageTime already updated
+            if (msg.type === "pong") return;
 
             if (msg.seq) lastSeq = msg.seq;
 
@@ -248,8 +265,6 @@
                     myColor = msg.color || myColor;
 
                     // ---- RESTORE RESPONSE ----
-                    // If we sent a 'restore' message, this full_sync is the server's
-                    // response (now with real content). Do a normal merge against it.
                     if (pendingRestore) {
                         pendingRestore = false;
                         var merged = mergeTexts(lastSyncedContent, localText, serverContent);
@@ -291,9 +306,6 @@
                         localText.length > 0;
 
                     // ---- SERVER RESTART (empty doc) ----
-                    // Send a 'restore' message so the server gets ONE authoritative copy.
-                    // Other tabs that also see empty will get the restored content when
-                    // their 'restore' response arrives (first restorer wins on server).
                     if (hasOfflineEdits && serverContent.length === 0) {
                         pendingRestore = true;
                         ws.send(JSON.stringify({
@@ -307,25 +319,24 @@
 
                     // ---- NORMAL MERGE ----
                     if (hasOfflineEdits) {
-                        var merged = mergeTexts(lastSyncedContent, localText, serverContent);
+                        var merged2 = mergeTexts(lastSyncedContent, localText, serverContent);
                         rebuildShadow(serverContent, msg.nodeIDs || []);
                         offlineBuffer = [];
-                        var freshOps = diffToOps(serverContent, merged, merged.length);
+                        var freshOps2 = diffToOps(serverContent, merged2, merged2.length);
 
-                        if (freshOps.length > 0) {
-                            editor.value = merged;
-                            oldValue = merged;
-                            addLog("System", "Merging " + freshOps.length + " offline changes...");
+                        if (freshOps2.length > 0) {
+                            editor.value = merged2;
+                            oldValue = merged2;
+                            addLog("System", "Merging " + freshOps2.length + " offline changes...");
                             ws.send(JSON.stringify({
                                 type: "batch_sync",
-                                content: JSON.stringify(freshOps)
+                                content: JSON.stringify(freshOps2)
                             }));
                         } else {
                             editor.value = serverContent;
                             oldValue = serverContent;
                         }
                     } else {
-                        // Normal sync — accept server state
                         editor.value = serverContent;
                         rebuildShadow(serverContent, msg.nodeIDs || []);
                         oldValue = serverContent;
@@ -341,13 +352,8 @@
                     break;
 
                 case "insert":
-                    // During pending restore, ignore remote ops — the restore's
-                    // full_sync response will have the complete state.
                     if (pendingRestore) break;
                     if (msg.userID === userID) {
-                        // Our own op confirmed by server — update shadow with server-assigned ID.
-                        // Ops are confirmed in FIFO order, so the first placeholder (clock < 0)
-                        // in the shadow is always the correct match.
                         if (msg.newID) {
                             for (var pi = 0; pi < shadow.length; pi++) {
                                 if (shadow[pi].id.clock < 0) {
@@ -365,12 +371,10 @@
                     var ss = editor.selectionStart;
                     var se = editor.selectionEnd;
 
-                    // Insert into shadow
                     if (msg.newID) {
                         shadowInsert(insPos, insCh, msg.newID);
                     }
 
-                    // Insert into editor
                     var before = editor.value.substring(0, insPos);
                     var after = editor.value.substring(insPos);
                     editor.value = before + insCh + after;
@@ -385,20 +389,15 @@
 
                 case "delete":
                     if (pendingRestore) break;
-                    if (msg.userID === userID) {
-                        // Our own delete confirmed — shadow was already updated in diffToOps.
-                        break;
-                    }
+                    if (msg.userID === userID) break;
                     isRemoteUpdate = true;
                     var dpos = (msg.position != null) ? msg.position : -1;
                     if (dpos >= 0 && dpos < editor.value.length) {
                         var dss = editor.selectionStart;
                         var dse = editor.selectionEnd;
 
-                        // Delete from shadow
                         shadowDelete(dpos);
 
-                        // Delete from editor
                         var dbefore = editor.value.substring(0, dpos);
                         var dafter = editor.value.substring(dpos + 1);
                         editor.value = dbefore + dafter;
@@ -424,7 +423,6 @@
 
                 case "presence":
                     renderUsers(msg.users || []);
-                    // Clean up cursors for users who left
                     if (msg.users) {
                         var activeIDs = {};
                         for (var i = 0; i < msg.users.length; i++) {
@@ -438,34 +436,6 @@
                     break;
             }
         };
-    }
-
-    // --- Client-side connection health check ---
-    // Browsers auto-respond to WebSocket pings, but we also periodically
-    // verify the connection is alive from our end for quick recovery.
-    let healthCheckTimer = null;
-    let lastMessageTime = 0;
-
-    function startHealthCheck() {
-        stopHealthCheck();
-        lastMessageTime = Date.now();
-        healthCheckTimer = setInterval(function() {
-            if (!connected || !ws || ws.readyState !== WebSocket.OPEN) return;
-            // If we haven't received ANY message from the server in 70s,
-            // the connection is likely dead (server pings every ~54s).
-            if (Date.now() - lastMessageTime > 70000) {
-                console.log("[SyncWave] No server activity for 70s, reconnecting...");
-                addLog("System", "Connection stale — reconnecting...");
-                ws.close();
-            }
-        }, 15000);
-    }
-
-    function stopHealthCheck() {
-        if (healthCheckTimer) {
-            clearInterval(healthCheckTimer);
-            healthCheckTimer = null;
-        }
     }
 
     function scheduleReconnect() {
@@ -501,12 +471,11 @@
     // ==========================================
     //   LOCAL EDITING — Input Diffing
     // ==========================================
-    // Capture old value before any input event
     editor.addEventListener("beforeinput", function() {
         oldValue = editor.value;
     });
 
-    editor.addEventListener("input", function(e) {
+    editor.addEventListener("input", function() {
         if (isRemoteUpdate) return;
 
         clearSuggestion();
@@ -523,18 +492,15 @@
         scheduleAICompletion();
     });
 
-    // Diff old value vs new value and produce insert/delete ops with anchorID/targetID.
     function diffToOps(oldVal, newVal, cursorAfter) {
         var ops = [];
 
-        // Find common prefix
         var prefixLen = 0;
         var minLen = Math.min(oldVal.length, newVal.length);
         while (prefixLen < minLen && oldVal.charAt(prefixLen) === newVal.charAt(prefixLen)) {
             prefixLen++;
         }
 
-        // Find common suffix (from end, not overlapping prefix)
         var suffixLen = 0;
         while (
             suffixLen < (oldVal.length - prefixLen) &&
@@ -547,7 +513,7 @@
         var deletedCount = oldVal.length - prefixLen - suffixLen;
         var insertedStr = newVal.substring(prefixLen, newVal.length - suffixLen);
 
-        // Generate delete ops (in reverse order so positions stay valid)
+        // Generate delete ops (reverse order for stable positions)
         for (var d = deletedCount - 1; d >= 0; d--) {
             var delPos = prefixLen + d;
             var targetID = shadowIDAtPos(delPos);
@@ -578,7 +544,6 @@
                 anchorID: anchorID
             });
 
-            // Insert placeholder into shadow immediately
             shadowInsert(insPos, ch, placeholderID);
         }
 
@@ -590,10 +555,7 @@
     // ==========================================
     function broadcastCursor() {
         if (!connected) return;
-        sendOp({
-            type: "cursor",
-            position: editor.selectionStart
-        });
+        sendOp({ type: "cursor", position: editor.selectionStart });
     }
 
     document.addEventListener("selectionchange", function() {
@@ -614,7 +576,6 @@
             var coords = getCaretCoordinates(pos);
             if (!coords) continue;
 
-            // Cursor line
             var cursorEl = document.createElement("div");
             cursorEl.className = "remote-cursor";
             cursorEl.style.left = coords.left + "px";
@@ -622,7 +583,6 @@
             cursorEl.style.height = coords.height + "px";
             cursorEl.style.backgroundColor = cursor.color;
 
-            // Label
             var label = document.createElement("div");
             label.className = "remote-cursor-label";
             label.style.backgroundColor = cursor.color;
@@ -633,7 +593,6 @@
         }
     }
 
-    // Measure caret coordinates by using a mirror div technique
     function getCaretCoordinates(pos) {
         var mirror = document.getElementById("caret-mirror");
         if (!mirror) {
@@ -643,7 +602,6 @@
             document.getElementById("editor-host").appendChild(mirror);
         }
 
-        // Copy editor styles
         var cs = window.getComputedStyle(editor);
         mirror.style.width = cs.width;
         mirror.style.fontFamily = cs.fontFamily;
@@ -664,7 +622,6 @@
         mirror.appendChild(textNode);
         mirror.appendChild(span);
 
-        var editorRect = editor.getBoundingClientRect();
         var hostRect = document.getElementById("editor-host").getBoundingClientRect();
         var spanRect = span.getBoundingClientRect();
 
@@ -698,7 +655,7 @@
     }
 
     function requestAICompletion() {
-        suggestionCursorPos = editor.selectionStart; // Capture cursor position for insertion
+        suggestionCursorPos = editor.selectionStart;
         var textBefore = editor.value.substring(0, suggestionCursorPos);
         var textAfter = editor.value.substring(suggestionCursorPos);
 
@@ -730,7 +687,7 @@
                                 var parsed = JSON.parse(data);
                                 if (parsed.token) { currentSuggestion += parsed.token; showSuggestion(currentSuggestion); }
                                 else if (parsed.error) { setAIStatus("error", "⚠ " + parsed.error); }
-                            } catch (e) {}
+                            } catch (e) { /* ignore parse errors from partial chunks */ }
                         }
                     }
                     readChunk();
@@ -742,19 +699,13 @@
     }
 
     function showSuggestion(text) {
-        // Render ghost text: textBefore + suggestion (greyed) + textAfter
         var cursorPos = suggestionCursorPos >= 0 ? suggestionCursorPos : editor.value.length;
         var textBefore = editor.value.substring(0, cursorPos);
         var textAfter = editor.value.substring(cursorPos);
 
-        // Use innerHTML with a span for the suggestion styling
-        var escapedBefore = escapeHtml(textBefore);
-        var escapedSuggestion = escapeHtml(text);
-        var escapedAfter = escapeHtml(textAfter);
-
-        ghostText.innerHTML = escapedBefore +
-            '<span class="ghost-suggestion">' + escapedSuggestion + '</span>' +
-            escapedAfter;
+        ghostText.innerHTML = escapeHtml(textBefore) +
+            '<span class="ghost-suggestion">' + escapeHtml(text) + '</span>' +
+            escapeHtml(textAfter);
         ghostText.classList.add("has-suggestion");
     }
 
@@ -762,8 +713,7 @@
         return str.replace(/&/g, "&amp;")
                   .replace(/</g, "&lt;")
                   .replace(/>/g, "&gt;")
-                  .replace(/"/g, "&quot;")
-                  .replace(/\n/g, "\n"); // preserve newlines for pre-wrap
+                  .replace(/"/g, "&quot;");
     }
 
     function clearSuggestion() {
@@ -776,20 +726,15 @@
     function acceptSuggestion() {
         if (!currentSuggestion) return;
 
-        // Insert at the cursor position where suggestion was requested
         var insertPos = suggestionCursorPos >= 0 ? suggestionCursorPos : editor.value.length;
-
-        // Build new editor value
         var before = editor.value.substring(0, insertPos);
         var after = editor.value.substring(insertPos);
 
-        // Capture old value for diffing
         oldValue = editor.value;
         editor.value = before + currentSuggestion + after;
         var newCursorPos = insertPos + currentSuggestion.length;
         editor.selectionStart = editor.selectionEnd = newCursorPos;
 
-        // Generate ops via diff
         var ops = diffToOps(oldValue, editor.value, newCursorPos);
         for (var i = 0; i < ops.length; i++) {
             sendOp(ops[i]);
