@@ -210,9 +210,15 @@
         };
 
         ws.onclose = function() {
+            // Only snapshot on the FIRST disconnect (connected→disconnected),
+            // not on retry failures. Otherwise retry onclose events overwrite
+            // lastSyncedContent with the current (offline-edited) text, making
+            // the three-way merge think nothing changed.
+            if (connected) {
+                lastSyncedContent = editor.value;
+            }
             connected = false;
             wasDisconnected = true;
-            lastSyncedContent = editor.value; // Snapshot the last confirmed state
             setConnectionStatus("offline");
             addLog("System", "Connection lost — edits saved locally");
             scheduleReconnect();
