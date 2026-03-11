@@ -24,13 +24,15 @@ var indexHTML []byte
 
 // RegisterRoutes sets up all HTTP routes on the given mux.
 func RegisterRoutes(mux *http.ServeMux, h *hub.Hub, assistant *ai.Assistant) {
-	// Serve index.html at root
+	// Serve index.html at root — never cache so Render always wakes from sleep
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+		w.Header().Set("Pragma", "no-cache")
 		w.Write(indexHTML)
 	})
 

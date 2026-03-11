@@ -894,12 +894,29 @@
 
     // --- Init ---
     function initApp() {
-        fetch("/health").then(function(r) { return r.json(); }).then(function(data) {
-            if (data.status === "no_api_key") setAIStatus("error", "⚠ AI disabled — no key");
-            else setAIStatus("ready", "✨ AI Ready");
-        }).catch(function() { setAIStatus("error", "⚠ Server error"); });
-
         oldValue = editor.value;
-        connect();
+        // Poll /health until the server responds. On Render free tier, the
+        // binary serves the HTML itself, so if the page loaded fresh the server
+        // is already up. But if the browser served a cached page while the
+        // server was asleep, we need to wait for it to wake before opening WS.
+        statusText.textContent = "Starting up...";
+        waitForServer(0);
+    }
+
+    function waitForServer(attempt) {
+        fetch("/health")
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.status === "no_api_key") setAIStatus("error", "⚠ AI disabled — no key");
+                else setAIStatus("ready", "✨ AI Ready");
+                connect(); // server is definitely up
+            })
+            .catch(function() {
+                // Server not ready yet (cold start) — retry with backoff
+                var delay = Math.min(2000 * Math.pow(1.5, attempt), 15000);
+                statusText.textContent = "Starting up...";
+                addLog("System", "Server waking up, retrying in " + Math.round(delay / 1000) + "s...");
+                setTimeout(function() { waitForServer(attempt + 1); }, delay);
+            });
     }
 })();
