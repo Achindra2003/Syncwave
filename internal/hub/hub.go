@@ -24,7 +24,11 @@ import (
 const maxOpLogSize = 1000
 
 var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
+	CheckOrigin:     func(r *http.Request) bool { return true },
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+	// Allow 30s for the upgrade handshake (Render cold starts can be slow)
+	HandshakeTimeout: 30 * time.Second,
 }
 
 // Hub manages connections, the document, and the operation log.
@@ -183,11 +187,23 @@ func (h *Hub) buildFullSync(color string) Message {
 // ServeWS handles a new WebSocket connection upgrade and starts the
 // client's read/write pump goroutines.
 func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
+	h.logger.Info("websocket upgrade request",
+		"remoteAddr", r.RemoteAddr,
+		"origin", r.Header.Get("Origin"),
+		"host", r.Host,
+	)
+
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		h.logger.Error("websocket upgrade failed", "error", err)
+		h.logger.Error("websocket upgrade failed",
+			"error", err,
+			"remoteAddr", r.RemoteAddr,
+		)
+		// upgrader.Upgrade already wrote an HTTP error response
 		return
 	}
+
+	h.logger.Info("websocket upgrade succeeded", "remoteAddr", r.RemoteAddr)
 
 	// Set a timeout for the initial join message
 	ws.SetReadDeadline(time.Now().Add(10 * time.Second))
