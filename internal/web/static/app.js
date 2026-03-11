@@ -521,8 +521,12 @@
         if (reconnectTimer) clearTimeout(reconnectTimer);
         reconnectAttempts++;
         var delay = Math.min(1000 * Math.pow(2, reconnectAttempts - 1), 30000);
+        statusText.textContent = "Reconnecting...";
         addLog("System", "Reconnecting in " + (delay / 1000) + "s...");
-        reconnectTimer = setTimeout(function() { connect(); }, delay);
+        // Use waitForServer instead of connect() so we confirm the server is
+        // alive before attempting the WebSocket handshake (prevents spin-loops
+        // against a still-restarting Render instance).
+        reconnectTimer = setTimeout(function() { waitForServer(0); }, delay);
     }
 
     function setConnectionStatus(status) {

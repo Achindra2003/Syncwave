@@ -67,10 +67,11 @@ func main() {
 	srv := &http.Server{
 		Addr:        ":" + cfg.Port,
 		Handler:     handler,
-		ReadTimeout: 15 * time.Second,
 		IdleTimeout: 120 * time.Second,
-		// WriteTimeout deliberately omitted: SSE streams require open-ended
-		// writes, and WebSocket connections are hijacked by gorilla/websocket.
+		// ReadTimeout and WriteTimeout deliberately omitted:
+		// - WriteTimeout would kill SSE streams
+		// - ReadTimeout would kill WebSocket upgrade on slow cold starts
+		// gorilla/websocket manages its own per-message deadlines via SetReadDeadline.
 	}
 
 	// ── Graceful Shutdown ───────────────────────────────────────────

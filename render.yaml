@@ -1,0 +1,20 @@
+# render.yaml — explicit Render service configuration for SyncWave
+# Docs: https://render.com/docs/render-yaml-reference
+services:
+  - type: web
+    name: syncwave
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    # Render sets the PORT env var automatically; our server reads it.
+    # envVars picks it up — no need to hardcode here.
+    healthCheckPath: /health
+    # WebSocket connections are long-lived. Render's default connection
+    # timeout is fine; we keep the connection alive with WS-level pings
+    # (every 20s) so the 30s proxy idle timeout is never hit.
+    envVars:
+      - key: PORT
+        value: 8080
+      - key: LOG_LEVEL
+        value: info
+      - key: GROQ_API_KEY
+        sync: false   # set this in Render dashboard → Environment
