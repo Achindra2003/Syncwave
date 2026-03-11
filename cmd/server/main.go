@@ -65,11 +65,12 @@ func main() {
 
 	// ── HTTP Server ─────────────────────────────────────────────────
 	srv := &http.Server{
-		Addr:         ":" + cfg.Port,
-		Handler:      handler,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Addr:        ":" + cfg.Port,
+		Handler:     handler,
+		ReadTimeout: 15 * time.Second,
+		IdleTimeout: 120 * time.Second,
+		// WriteTimeout deliberately omitted: SSE streams require open-ended
+		// writes, and WebSocket connections are hijacked by gorilla/websocket.
 	}
 
 	// ── Graceful Shutdown ───────────────────────────────────────────

@@ -18,6 +18,10 @@
     var nameModal = document.getElementById("nameModal");
     var nameInput = document.getElementById("nameInput");
     var nameSubmit = document.getElementById("nameSubmit");
+    var toastContainer = document.getElementById("toastContainer");
+    var exportBtn = document.getElementById("exportBtn");
+    var typingBar = document.getElementById("typingBar");
+    var typingText = document.getElementById("typingText");
 
     // --- Identity ---
     var userID = "U-" + Math.random().toString(36).substring(2, 6).toUpperCase();
@@ -74,12 +78,12 @@
             if (connected && ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ type: "ping" }));
             }
-        }, 25000);
+        }, 20000);
 
         // If no message from server in 70s, force reconnect
         healthCheckTimer = setInterval(function() {
             if (!connected || !ws || ws.readyState !== WebSocket.OPEN) return;
-            if (Date.now() - lastMessageTime > 70000) {
+            if (Date.now() - lastMessageTime > 45000) {
                 console.log("[SyncWave] No server activity for 70s, reconnecting...");
                 addLog("System", "Connection stale — reconnecting...");
                 ws.close();
@@ -90,6 +94,56 @@
     function stopHealthCheck() {
         if (healthCheckTimer) { clearInterval(healthCheckTimer); healthCheckTimer = null; }
         if (appPingTimer) { clearInterval(appPingTimer); appPingTimer = null; }
+    }
+
+    // --- Toast Notifications ---
+    function showToast(icon, message) {
+        if (!toastContainer) return;
+        var toast = document.createElement("div");
+        toast.className = "toast";
+        toast.innerHTML = '<span class="toast-icon">' + icon + '</span><span>' + message + '</span>';
+        toastContainer.appendChild(toast);
+        setTimeout(function() {
+            if (toast.parentNode) toast.parentNode.removeChild(toast);
+        }, 4200);
+    }
+
+    // --- Typing Indicator ---
+    var typingTimers = {};
+    var lastTypingSent = 0;
+
+    function sendTypingIndicator() {
+        var now = Date.now();
+        if (now - lastTypingSent < 2500) return;
+        lastTypingSent = now;
+        if (connected && ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "typing" }));
+        }
+    }
+
+    function handleTypingIndicator(name) {
+        if (typingTimers[name]) clearTimeout(typingTimers[name]);
+        typingBar.classList.add("visible");
+        updateTypingDisplay();
+        typingTimers[name] = setTimeout(function() {
+            delete typingTimers[name];
+            updateTypingDisplay();
+        }, 3500);
+    }
+
+    function updateTypingDisplay() {
+        var names = Object.keys(typingTimers);
+        if (names.length === 0) {
+            typingBar.classList.remove("visible");
+            return;
+        }
+        if (names.length === 1) {
+            typingText.textContent = names[0] + " is typing...";
+        } else if (names.length === 2) {
+            typingText.textContent = names[0] + " and " + names[1] + " are typing...";
+        } else {
+            typingText.textContent = names.length + " people are typing...";
+        }
     }
 
     // --- Three-way merge ---
@@ -196,6 +250,9 @@
     // --- Remote Cursors ---
     var remoteCursors = {};
 
+    // --- Known Users (for join/leave notifications) ---
+    var knownUsers = {};
+
     // --- Old Value Tracking ---
     var oldValue = "";
 
@@ -221,6 +278,7 @@
             reconnectAttempts = 0;
             setConnectionStatus("online");
             startHealthCheck();
+            showToast("🟢", "Connected to SyncWave");
 
             ws.send(JSON.stringify({
                 type: "join",
@@ -240,6 +298,7 @@
             setConnectionStatus("offline");
             stopHealthCheck();
             addLog("System", "Connection lost — edits saved locally");
+            showToast("🔴", "Connection lost — working offline");
             scheduleReconnect();
         };
 
@@ -426,12 +485,31 @@
                     if (msg.users) {
                         var activeIDs = {};
                         for (var i = 0; i < msg.users.length; i++) {
-                            activeIDs[msg.users[i].id] = true;
+                            var pu = msg.users[i];
+                            activeIDs[pu.id] = true;
+                            if (!knownUsers[pu.id] && pu.id !== userID) {
+                                showToast("👋", pu.name + " joined");
+                            }
+                        }
+                        for (var kid in knownUsers) {
+                            if (!activeIDs[kid] && kid !== userID) {
+                                showToast("👋", knownUsers[kid] + " left");
+                            }
+                        }
+                        knownUsers = {};
+                        for (var ki = 0; ki < msg.users.length; ki++) {
+                            knownUsers[msg.users[ki].id] = msg.users[ki].name;
                         }
                         for (var uid in remoteCursors) {
                             if (!activeIDs[uid]) delete remoteCursors[uid];
                         }
                         renderRemoteCursors();
+                    }
+                    break;
+
+                case "typing":
+                    if (msg.userID !== userID && msg.userName) {
+                        handleTypingIndicator(msg.userName);
                     }
                     break;
             }
@@ -490,6 +568,7 @@
         oldValue = newValue;
         updateCharCount();
         scheduleAICompletion();
+        sendTypingIndicator();
     });
 
     function diffToOps(oldVal, newVal, cursorAfter) {
@@ -773,7 +852,7 @@
             div.innerHTML += '<span class="tooltip">' + u.name + '</span>';
             avatarsDiv.appendChild(div);
         }
-        statusText.textContent = users.length + " editing";
+        statusText.textContent = users.length + (users.length === 1 ? " editor" : " editors");
     }
 
     function addLog(who, text) {
@@ -788,13 +867,30 @@
         var count = editor.value.length;
         var words = editor.value.trim() ? editor.value.trim().split(/\s+/).length : 0;
         var bufferInfo = offlineBuffer.length > 0 ? " | " + offlineBuffer.length + " buffered" : "";
-        charCountEl.textContent = count + " chars | " + words + " words" + bufferInfo;
+        charCountEl.textContent = count + " chars · " + words + " words" + bufferInfo;
     }
 
     function setAIStatus(type, msg) {
         aiBadge.textContent = msg;
         aiBadge.className = "ai-badge " + type;
     }
+
+    // --- Export Document ---
+    exportBtn.addEventListener("click", function() {
+        var text = editor.value;
+        if (!text) { showToast("⚠️", "Document is empty"); return; }
+        var blob = new Blob([text], { type: "text/plain" });
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement("a");
+        a.href = url;
+        a.download = (document.getElementById("docTitle").value || "document") + ".txt";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        showToast("✅", "Document exported");
+        addLog("System", "Document exported");
+    });
 
     // --- Init ---
     function initApp() {

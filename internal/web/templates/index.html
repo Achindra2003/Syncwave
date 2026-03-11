@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SyncWave — Collaborative Editor</title>
     <meta name="description" content="Real-time collaborative document editor powered by CRDT and AI">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌊</text></svg>">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/style.css">
 </head>
@@ -13,16 +14,21 @@
     <div class="name-modal" id="nameModal">
         <div class="name-card">
             <h2>SyncWave</h2>
-            <p>Enter your name to start collaborating</p>
-            <input type="text" id="nameInput" placeholder="Your name..." maxlength="20" autofocus />
-            <button id="nameSubmit">Start Editing</button>
+            <p class="subtitle">Real-time collaborative editing powered by CRDT</p>
+            <input type="text" id="nameInput" placeholder="Enter your name..." maxlength="20" autofocus />
+            <button id="nameSubmit">Join Document</button>
         </div>
     </div>
 
+    <!-- Toast Notifications -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <!-- Top Bar -->
     <div class="topbar">
         <div class="topbar-left">
             <div class="logo">SyncWave</div>
-            <input class="doc-title" id="docTitle" value="Untitled Document" />
+            <div class="logo-sep"></div>
+            <input class="doc-title" id="docTitle" value="Untitled Document" spellcheck="false" />
         </div>
         <div class="topbar-right">
             <div class="avatars" id="avatars"></div>
@@ -33,37 +39,56 @@
         </div>
     </div>
 
+    <!-- Toolbar -->
     <div class="toolbar">
-        <span class="toolbar-info" id="toolbarInfo">CRDT + AI</span>
+        <button class="toolbar-btn" id="exportBtn" title="Export document as text file">
+            ↓ Export
+        </button>
+        <div class="toolbar-sep"></div>
+        <span class="toolbar-info" id="toolbarInfo">CRDT · Goroutines · WebSocket</span>
+        <div class="toolbar-spacer"></div>
         <div class="ai-badge" id="aiBadge">✨ AI Ready</div>
     </div>
 
-    <div class="offline-banner" id="offlineBanner">
-        ⚡ Offline Mode — Edits are saved locally and will sync when reconnected
+    <!-- Typing Indicator -->
+    <div class="typing-bar" id="typingBar">
+        <div class="typing-dots"><span></span><span></span><span></span></div>
+        <span id="typingText">Someone is typing...</span>
     </div>
 
+    <!-- Offline Banner -->
+    <div class="offline-banner" id="offlineBanner">
+        ⚡ Offline — Your edits are saved locally and will sync when reconnected
+    </div>
+
+    <!-- Editor -->
     <div class="editor-wrap">
         <div class="page">
             <div id="editor-host">
-                <textarea id="editor" placeholder="Start typing... AI suggestions appear as grey text (press Tab to accept).&#10;&#10;Open another browser tab to collaborate in real time!"></textarea>
+                <textarea id="editor" placeholder="Start typing to begin your document...&#10;&#10;AI suggestions appear as grey ghost text — press Tab to accept.&#10;Open another browser tab to see real-time collaboration!"></textarea>
                 <div id="ghost-text"></div>
                 <div id="cursors-overlay"></div>
             </div>
         </div>
     </div>
 
+    <!-- Bottom Bar -->
     <div class="bottombar">
-        <div class="shortcuts">
-            <span><kbd>Tab</kbd> Accept AI suggestion</span>
-            <span><kbd>Esc</kbd> Dismiss</span>
+        <div class="bottombar-left">
+            <div class="shortcuts">
+                <span><kbd>Tab</kbd> Accept AI</span>
+                <span><kbd>Esc</kbd> Dismiss</span>
+            </div>
         </div>
-        <span id="charCount">0 chars</span>
-        <span>SyncWave — CRDT + AI</span>
+        <div class="bottombar-right">
+            <span id="charCount">0 chars · 0 words</span>
+        </div>
     </div>
 
+    <!-- Activity Panel -->
     <button class="activity-toggle" id="activityBtn" title="Activity Feed">💬</button>
     <div class="activity-panel" id="activityPanel">
-        <h4>Activity Feed</h4>
+        <h4>Activity</h4>
         <div id="logContainer"></div>
     </div>
 

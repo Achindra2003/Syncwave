@@ -14,11 +14,12 @@ const (
 	// writeWait is the time allowed to write a message to the peer.
 	writeWait = 10 * time.Second
 
-	// pongWait is the time allowed to read the next pong message from the peer.
-	pongWait = 60 * time.Second
+	// pongWait is the time allowed to read the next pong from the peer.
+	// Set to 30s to stay within reverse-proxy idle timeouts (e.g., Render).
+	pongWait = 30 * time.Second
 
 	// pingPeriod sends pings at this interval. Must be less than pongWait.
-	pingPeriod = (pongWait * 9) / 10
+	pingPeriod = 20 * time.Second
 
 	// maxMessageSize is the maximum allowed incoming message size.
 	maxMessageSize = 512 * 1024
@@ -198,6 +199,14 @@ func (cc *ClientConn) handleMessage(msg *Message, user User) {
 		h.broadcastExcept(outRaw, cc.conn) // broadcast to others
 
 	case "cursor":
+		msg.UserID = user.ID
+		msg.UserName = user.Name
+		msg.Color = user.Color
+		outRaw, _ := json.Marshal(msg)
+		h.broadcastExcept(outRaw, cc.conn)
+
+	case "typing":
+		// Typing indicator broadcast — ephemeral, not logged.
 		msg.UserID = user.ID
 		msg.UserName = user.Name
 		msg.Color = user.Color
