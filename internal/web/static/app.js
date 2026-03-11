@@ -265,15 +265,22 @@
     //   WEBSOCKET CONNECTION
     // ==========================================
     function connect() {
+        var wsUrl;
         try {
             var wsProtocol = location.protocol === "https:" ? "wss://" : "ws://";
-            ws = new WebSocket(wsProtocol + location.host + "/ws");
+            wsUrl = wsProtocol + location.host + "/ws";
+            console.log("[SyncWave] Connecting to:", wsUrl);
+            addLog("System", "Connecting to WebSocket...");
+            ws = new WebSocket(wsUrl);
         } catch(e) {
+            console.error("[SyncWave] WebSocket constructor error:", e);
+            addLog("System", "WebSocket error: " + e.message);
             scheduleReconnect();
             return;
         }
 
         ws.onopen = function() {
+            console.log("[SyncWave] WebSocket opened");
             connected = true;
             reconnectAttempts = 0;
             setConnectionStatus("online");
@@ -288,7 +295,9 @@
             }));
         };
 
-        ws.onclose = function() {
+        ws.onclose = function(event) {
+            console.log("[SyncWave] WebSocket closed:", event.code, event.reason);
+            addLog("System", "WS closed: code=" + event.code);
             if (connected) {
                 lastSyncedContent = editor.value;
             }
@@ -302,7 +311,10 @@
             scheduleReconnect();
         };
 
-        ws.onerror = function() {};
+        ws.onerror = function(event) {
+            console.error("[SyncWave] WebSocket error:", event);
+            addLog("System", "WebSocket error occurred");
+        };
 
         ws.onmessage = function(event) {
             lastMessageTime = Date.now();
@@ -908,14 +920,20 @@
     }
 
     function waitForServer(attempt) {
+        console.log("[SyncWave] waitForServer attempt:", attempt);
         fetch("/health")
-            .then(function(r) { return r.json(); })
+            .then(function(r) {
+                console.log("[SyncWave] /health response:", r.status);
+                return r.json();
+            })
             .then(function(data) {
+                console.log("[SyncWave] /health data:", data);
                 if (data.status === "no_api_key") setAIStatus("error", "⚠ AI disabled — no key");
                 else setAIStatus("ready", "✨ AI Ready");
                 connect(); // server is definitely up
             })
-            .catch(function() {
+            .catch(function(err) {
+                console.log("[SyncWave] /health failed:", err);
                 // Server not ready yet (cold start) — retry with backoff
                 var delay = Math.min(2000 * Math.pow(1.5, attempt), 15000);
                 statusText.textContent = "Starting up...";
