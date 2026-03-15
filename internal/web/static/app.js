@@ -63,8 +63,8 @@
     var urlParams = new URLSearchParams(location.search);
     var docID = urlParams.get("doc_id") || urlParams.get("doc") || "";
     if (!docID) {
-        docID = generateRoomID();
-        syncRoomURL(docID);
+        window.location.href = "/";
+        return;
     }
 
     // The editor content at the moment of last disconnect — used as the "base"
@@ -365,7 +365,7 @@
     }
 
     function getShareURL() {
-        return window.location.origin + window.location.pathname + "?doc_id=" + encodeURIComponent(docID);
+        return window.location.origin + "/editor?doc_id=" + encodeURIComponent(docID);
     }
 
     function copyShareLink() {
@@ -398,9 +398,23 @@
     }
 
     function createPrivateRoom() {
-        var newID = generateRoomID();
-        var target = window.location.origin + window.location.pathname + "?doc_id=" + encodeURIComponent(newID);
-        window.location.href = target;
+        fetch("/api/docs", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title: "Untitled Document" })
+        })
+        .then(function(res) {
+            if (!res.ok) throw new Error("create failed");
+            return res.json();
+        })
+        .then(function(data) {
+            if (data && data.document && data.document.id) {
+                window.location.href = "/editor?doc_id=" + encodeURIComponent(data.document.id);
+            }
+        })
+        .catch(function() {
+            showToast("⚠️", "Could not create document");
+        });
     }
 
     function setMode(mode) {

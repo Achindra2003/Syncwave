@@ -12,6 +12,7 @@ import (
 
 	"syncwave/internal/ai"
 	"syncwave/internal/config"
+	"syncwave/internal/docs"
 	"syncwave/internal/hub"
 	"syncwave/internal/web"
 )
@@ -36,8 +37,23 @@ func main() {
 	h := hub.NewHub(logger)
 	h.ConfigureAllowedOrigins(cfg.AllowedOrigins)
 
+	docService, err := docs.NewSQLiteService(cfg.SQLitePath)
+	if err != nil {
+		logger.Error("failed to initialize SQLite service", "error", err)
+		os.Exit(1)
+	}
+
+	h.SetPersistence(
+		func(docID string) (string, int, error) {
+			return docService.LoadStateOrCreate(docID)
+		},
+		func(docID string, content string, seq int) error {
+			return docService.SaveState(docID, content, seq)
+		},
+	)
+
 	mux := http.NewServeMux()
-	web.RegisterRoutes(mux, h, assistant)
+	web.RegisterRoutes(mux, h, assistant, docService)
 
 	srv := &http.Server{
 		Addr:        fmt.Sprintf(":%s", cfg.Port),

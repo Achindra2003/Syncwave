@@ -34,6 +34,8 @@ type Hub struct {
 
 	strictOrigin   bool
 	allowedOrigins map[string]struct{}
+	loadDocument   func(docID string) (content string, seq int, err error)
+	saveDocument   func(docID string, content string, seq int) error
 }
 
 type Room struct {
@@ -44,6 +46,7 @@ type Room struct {
 	opLog   []LogEntry
 	seqNum  int
 	mu      sync.Mutex
+	persist func(content string, seq int) error
 }
 
 func NewHub(logger *slog.Logger) *Hub {
@@ -68,6 +71,16 @@ func (h *Hub) ConfigureAllowedOrigins(origins []string) {
 		h.allowedOrigins[origin] = struct{}{}
 	}
 	h.strictOrigin = len(h.allowedOrigins) > 0
+}
+
+func (h *Hub) SetPersistence(
+	load func(docID string) (content string, seq int, err error),
+	save func(docID string, content string, seq int) error,
+) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.loadDocument = load
+	h.saveDocument = save
 }
 
 func (h *Hub) isOriginAllowed(r *http.Request) bool {
@@ -145,9 +158,40 @@ func (h *Hub) getOrCreateRoom(docID string) *Room {
 		return room
 	}
 	room := newRoom(docID)
+	if h.saveDocument != nil {
+		room.persist = func(content string, seq int) error {
+			return h.saveDocument(docID, content, seq)
+		}
+	}
+	if h.loadDocument != nil {
+		content, seq, err := h.loadDocument(docID)
+		if err != nil {
+			h.logger.Warn("failed loading persisted document", "docID", docID, "error", err)
+		} else {
+			hydrateRoomFromContent(room, content)
+			if seq >= 0 {
+				room.seqNum = seq
+			}
+			h.logger.Info("room restored from persistence", "docID", docID, "chars", room.doc.Len(), "seq", room.seqNum)
+		}
+	}
 	h.rooms[docID] = room
 	h.logger.Info("room created", "docID", docID)
 	return room
+}
+
+func hydrateRoomFromContent(room *Room, content string) {
+	if content == "" {
+		return
+	}
+	runes := []rune(content)
+	anchor := crdt.RootID
+	for _, ch := range runes {
+		room.clock++
+		newID := crdt.OpID{Clock: room.clock, SiteID: "persist"}
+		room.doc.Insert(ch, anchor, newID)
+		anchor = newID
+	}
 }
 
 func (h *Hub) removeRoomIfEmpty(docID string, expected *Room) {
@@ -260,6 +304,12 @@ func (r *Room) applyOp(msg *Message, user User, logger *slog.Logger) bool {
 	r.opLog = append(r.opLog, LogEntry{Seq: msg.Seq, Msg: *msg})
 	if len(r.opLog) > maxOpLogSize {
 		r.opLog = r.opLog[len(r.opLog)-maxOpLogSize:]
+	}
+
+	if r.persist != nil {
+		if err := r.persist(r.doc.String(), r.seqNum); err != nil {
+			logger.Warn("persist failed", "docID", r.docID, "error", err)
+		}
 	}
 
 	return true

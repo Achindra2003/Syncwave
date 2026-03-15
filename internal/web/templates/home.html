@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SyncWave — Documents</title>
+    <style>
+        :root {
+            --bg: #0b0b1a;
+            --panel: rgba(18, 18, 42, 0.72);
+            --border: rgba(255,255,255,0.1);
+            --text: #e9e9f8;
+            --muted: #9ea1bf;
+            --primary: #7c5cff;
+            --accent: #00c8ff;
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            min-height: 100vh;
+            font-family: Inter, system-ui, -apple-system, sans-serif;
+            color: var(--text);
+            background:
+                radial-gradient(1000px 600px at 0% 0%, rgba(124,92,255,0.18), transparent 60%),
+                radial-gradient(900px 500px at 100% 0%, rgba(0,200,255,0.14), transparent 55%),
+                var(--bg);
+            display: flex;
+            justify-content: center;
+            padding: 40px 16px;
+        }
+        .shell {
+            width: 100%;
+            max-width: 980px;
+        }
+        .hero {
+            margin-bottom: 16px;
+        }
+        .hero h1 {
+            margin: 0;
+            font-size: 2rem;
+            background: linear-gradient(135deg, var(--accent), var(--primary));
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+        }
+        .hero p { color: var(--muted); margin: 8px 0 0; }
+        .card {
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            backdrop-filter: blur(10px);
+            padding: 18px;
+            box-shadow: 0 8px 36px rgba(0,0,0,0.3);
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin-bottom: 14px;
+        }
+        input, button {
+            border-radius: 10px;
+            border: 1px solid var(--border);
+            background: rgba(255,255,255,0.04);
+            color: var(--text);
+            font: inherit;
+            padding: 10px 12px;
+        }
+        input { min-width: 260px; flex: 1; }
+        button { cursor: pointer; font-weight: 600; }
+        .primary {
+            background: linear-gradient(135deg, var(--primary), var(--accent));
+            border: none;
+            color: white;
+        }
+        .row {
+            display: grid;
+            grid-template-columns: 1fr auto;
+            align-items: center;
+            gap: 10px;
+            padding: 10px 0;
+            border-top: 1px solid rgba(255,255,255,0.07);
+        }
+        .row:first-child { border-top: none; }
+        .meta { color: var(--muted); font-size: 0.85rem; }
+        .link-btn {
+            background: rgba(124,92,255,0.15);
+            border-color: rgba(124,92,255,0.35);
+        }
+        .empty { color: var(--muted); padding: 10px 0; }
+    </style>
+</head>
+<body>
+    <div class="shell">
+        <div class="hero">
+            <h1>SyncWave Documents</h1>
+            <p>Create a document, then share the link to collaborate in real time with CRDT sync and AI assistance.</p>
+        </div>
+
+        <div class="card">
+            <div class="controls">
+                <input id="titleInput" placeholder="Untitled Document" maxlength="120" />
+                <button class="primary" id="createBtn">Create New Document</button>
+            </div>
+            <div id="docsList"></div>
+        </div>
+    </div>
+
+    <script>
+    (function () {
+        const createBtn = document.getElementById('createBtn');
+        const titleInput = document.getElementById('titleInput');
+        const docsList = document.getElementById('docsList');
+
+        async function fetchDocs() {
+            const res = await fetch('/api/docs?limit=50');
+            if (!res.ok) throw new Error('Failed to fetch documents');
+            return res.json();
+        }
+
+        function openDoc(id) {
+            window.location.href = '/editor?doc_id=' + encodeURIComponent(id);
+        }
+
+        function renderDocs(items) {
+            docsList.innerHTML = '';
+            if (!items || items.length === 0) {
+                const div = document.createElement('div');
+                div.className = 'empty';
+                div.textContent = 'No documents yet. Create your first one.';
+                docsList.appendChild(div);
+                return;
+            }
+
+            for (const doc of items) {
+                const row = document.createElement('div');
+                row.className = 'row';
+
+                const left = document.createElement('div');
+                const title = document.createElement('div');
+                title.textContent = doc.title || 'Untitled Document';
+                const meta = document.createElement('div');
+                meta.className = 'meta';
+                meta.textContent = 'ID: ' + doc.id + ' · Updated: ' + doc.updatedAt;
+                left.appendChild(title);
+                left.appendChild(meta);
+
+                const openBtn = document.createElement('button');
+                openBtn.className = 'link-btn';
+                openBtn.textContent = 'Open';
+                openBtn.onclick = function () { openDoc(doc.id); };
+
+                row.appendChild(left);
+                row.appendChild(openBtn);
+                docsList.appendChild(row);
+            }
+        }
+
+        async function refresh() {
+            try {
+                const data = await fetchDocs();
+                renderDocs((data && data.documents) || []);
+            } catch (err) {
+                docsList.innerHTML = '<div class="empty">Failed to load documents.</div>';
+            }
+        }
+
+        async function createDoc() {
+            createBtn.disabled = true;
+            try {
+                const res = await fetch('/api/docs', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ title: titleInput.value || '' })
+                });
+                if (!res.ok) throw new Error('Failed to create document');
+                const data = await res.json();
+                if (data && data.document && data.document.id) {
+                    openDoc(data.document.id);
+                }
+            } catch (_) {
+                alert('Could not create document right now.');
+            } finally {
+                createBtn.disabled = false;
+            }
+        }
+
+        createBtn.addEventListener('click', createDoc);
+        titleInput.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter') createDoc();
+        });
+
+        refresh();
+    })();
+    </script>
+</body>
+</html>

@@ -16,6 +16,7 @@ import (
 // Config holds all application configuration values.
 type Config struct {
 	Port           string            // HTTP server port (default: "8080")
+	SQLitePath     string            // SQLite database path (default: data/syncwave.db)
 	GroqAPIKey     string            // API key for Groq LLM service
 	LogLevel       slog.Level        // Logging verbosity (info or debug)
 	DatabaseURL    string            // PostgreSQL DSN (optional)
@@ -75,6 +76,7 @@ func Load() *Config {
 
 	return &Config{
 		Port:           port,
+		SQLitePath:     getOrDefault("SQLITE_PATH", "data/syncwave.db"),
 		GroqAPIKey:     os.Getenv("GROQ_API_KEY"),
 		LogLevel:       level,
 		DatabaseURL:    os.Getenv("DATABASE_URL"),
@@ -85,4 +87,12 @@ func Load() *Config {
 		AllowedOrigins: allowedOrigins,
 		RedisURL:       os.Getenv("REDIS_URL"),
 	}
+}
+
+func getOrDefault(key string, fallback string) string {
+	v := os.Getenv(key)
+	if strings.TrimSpace(v) == "" {
+		return fallback
+	}
+	return v
 }

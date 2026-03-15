@@ -85,7 +85,7 @@ func TestRegisterRoutesRootServesHTML(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	h := hub.NewHub(logger)
 	mux := http.NewServeMux()
-	RegisterRoutes(mux, h, nil)
+	RegisterRoutes(mux, h, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rr := httptest.NewRecorder()
@@ -103,7 +103,7 @@ func TestRegisterRoutesCompleteUnavailableWithoutAssistant(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	h := hub.NewHub(logger)
 	mux := http.NewServeMux()
-	RegisterRoutes(mux, h, nil)
+	RegisterRoutes(mux, h, nil, nil)
 
 	body := `{"textBefore":"this is enough context","textAfter":""}`
 	req := httptest.NewRequest(http.MethodPost, "/api/complete", strings.NewReader(body))
@@ -119,7 +119,7 @@ func TestRegisterRoutesWebSocketEndpointExists(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	h := hub.NewHub(logger)
 	mux := http.NewServeMux()
-	RegisterRoutes(mux, h, nil)
+	RegisterRoutes(mux, h, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
 	rr := httptest.NewRecorder()

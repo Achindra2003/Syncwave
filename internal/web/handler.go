@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"syncwave/internal/ai"
+	"syncwave/internal/docs"
 	"syncwave/internal/hub"
 )
 
@@ -18,16 +21,29 @@ var staticFiles embed.FS
 //go:embed templates/index.html
 var indexHTML []byte
 
+//go:embed templates/home.html
+var homeHTML []byte
+
 type completer interface {
 	StreamComplete(ctx context.Context, textBefore, textAfter string) <-chan ai.StreamResult
 }
 
-func RegisterRoutes(mux *http.ServeMux, h *hub.Hub, assistant *ai.Assistant) {
+type documentService interface {
+	CreateDocument(title string) (docs.Doc, error)
+	ListDocuments(limit int) ([]docs.Doc, error)
+}
+
+func RegisterRoutes(mux *http.ServeMux, h *hub.Hub, assistant *ai.Assistant, docService documentService) {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
 			return
 		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(homeHTML)
+	})
+
+	mux.HandleFunc("/editor", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
 		w.Header().Set("Pragma", "no-cache")
@@ -40,6 +56,7 @@ func RegisterRoutes(mux *http.ServeMux, h *hub.Hub, assistant *ai.Assistant) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
+	mux.HandleFunc("/api/docs", handleDocs(docService))
 
 	mux.HandleFunc("/ws", h.ServeWS)
 	var c completer
@@ -47,6 +64,64 @@ func RegisterRoutes(mux *http.ServeMux, h *hub.Hub, assistant *ai.Assistant) {
 		c = assistant
 	}
 	mux.HandleFunc("/api/complete", handleComplete(c))
+}
+
+func handleDocs(docService documentService) http.HandlerFunc {
+	type createDocRequest struct {
+		Title string `json:"title"`
+	}
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		if docService == nil {
+			w.Header().Set("Content-Type", "application/json")
+			http.Error(w, `{"error":"Document service unavailable"}`, http.StatusServiceUnavailable)
+			return
+		}
+
+		switch r.Method {
+		case http.MethodGet:
+			limit := 50
+			if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+				if n, err := strconv.Atoi(raw); err == nil && n > 0 && n <= 200 {
+					limit = n
+				}
+			}
+
+			docs, err := docService.ListDocuments(limit)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				http.Error(w, `{"error":"Failed to list documents"}`, http.StatusInternalServerError)
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"documents": docs})
+			return
+
+		case http.MethodPost:
+			var req createDocRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+
+			doc, err := docService.CreateDocument(req.Title)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				http.Error(w, `{"error":"Failed to create document"}`, http.StatusInternalServerError)
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"document": doc,
+				"url":      "/editor?doc_id=" + doc.ID,
+			})
+			return
+
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+	}
 }
 
 func handleComplete(assistant completer) http.HandlerFunc {
