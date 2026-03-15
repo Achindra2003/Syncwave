@@ -36,6 +36,10 @@ func RegisterRoutes(mux *http.ServeMux, h *hub.Hub, assistant *ai.Assistant) {
 
 	staticSub, _ := fs.Sub(staticFiles, "static")
 	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticSub))))
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	})
 
 	mux.HandleFunc("/ws", h.ServeWS)
 	var c completer
