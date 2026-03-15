@@ -11,47 +11,41 @@ import (
 )
 
 const (
-	// writeWait is the time allowed to write a message to the peer.
-	writeWait = 10 * time.Second
-
-	// pongWait is the time allowed to read the next pong from the peer.
-	// Set to 30s to stay within reverse-proxy idle timeouts (e.g., Render).
-	pongWait = 30 * time.Second
-
-	// pingPeriod sends pings at this interval. Must be less than pongWait.
-	pingPeriod = 20 * time.Second
-
-	// maxMessageSize is the maximum allowed incoming message size.
+	writeWait      = 10 * time.Second
+	pongWait       = 30 * time.Second
+	pingPeriod     = 20 * time.Second
 	maxMessageSize = 512 * 1024
-
-	// sendBufSize is the per-client channel buffer for outgoing messages.
-	sendBufSize = 256
+	sendBufSize    = 256
 )
 
-// ClientConn wraps a WebSocket connection with a buffered send channel.
-// All writes are serialized through the writePump goroutine to prevent
-// concurrent write panics in gorilla/websocket.
 type ClientConn struct {
 	hub       *Hub
+	room      *Room
 	conn      *websocket.Conn
 	user      User
 	send      chan []byte
-	closeOnce sync.Once // ensures the send channel is closed exactly once
+	sendMu    sync.Mutex
+	closed    bool
+	closeOnce sync.Once
 }
 
-// newClientConn creates a new client connection wrapper.
-func newClientConn(h *Hub, conn *websocket.Conn, user User) *ClientConn {
+func newClientConn(h *Hub, room *Room, conn *websocket.Conn, user User) *ClientConn {
 	return &ClientConn{
 		hub:  h,
+		room: room,
 		conn: conn,
 		user: user,
 		send: make(chan []byte, sendBufSize),
 	}
 }
 
-// safeSend pushes a message to the client's send channel without blocking.
-// Returns false if the channel is full (client is too slow / dead).
 func (cc *ClientConn) safeSend(msg []byte) bool {
+	cc.sendMu.Lock()
+	defer cc.sendMu.Unlock()
+	if cc.closed {
+		return false
+	}
+
 	select {
 	case cc.send <- msg:
 		return true
@@ -60,31 +54,32 @@ func (cc *ClientConn) safeSend(msg []byte) bool {
 	}
 }
 
-// closeSend closes the send channel exactly once, preventing double-close panics.
 func (cc *ClientConn) closeSend() {
 	cc.closeOnce.Do(func() {
+		cc.sendMu.Lock()
+		defer cc.sendMu.Unlock()
+		cc.closed = true
 		close(cc.send)
 	})
 }
 
-// writePump pumps messages from the send channel to the WebSocket connection.
-// A single goroutine runs writePump for each connection, ensuring all writes
-// are serialized. It also sends periodic WebSocket pings to keep the
-// connection alive through reverse proxies (e.g., Render, Cloudflare).
 func (cc *ClientConn) writePump() {
-	ticker := time.NewTicker(pingPeriod)
 	defer func() {
-		ticker.Stop()
+		if recovered := recover(); recovered != nil {
+			cc.hub.logger.Error("writePump panic recovered", "user", cc.user.Name, "docID", cc.room.docID)
+		}
 		cc.conn.Close()
 	}()
+
+	ticker := time.NewTicker(pingPeriod)
+	defer ticker.Stop()
 
 	for {
 		select {
 		case msg, ok := <-cc.send:
 			cc.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if !ok {
-				// Hub closed the channel — send a close frame and exit.
-				cc.conn.WriteMessage(websocket.CloseMessage, []byte{})
+				_ = cc.conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
 			if err := cc.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
@@ -100,19 +95,24 @@ func (cc *ClientConn) writePump() {
 	}
 }
 
-// readPump reads messages from the WebSocket connection and dispatches them.
-// It runs in its own goroutine (one per connection) started by ServeWS.
 func (cc *ClientConn) readPump() {
 	h := cc.hub
+	room := cc.room
 	user := cc.user
+	docID := room.docID
 
 	defer func() {
-		h.mu.Lock()
-		delete(h.clients, cc.conn)
-		h.logger.Info("user left", "name", user.Name, "users", len(h.clients))
-		h.broadcastPresence()
-		h.mu.Unlock()
-		cc.closeSend() // signals writePump to exit
+		if recover() != nil {
+			h.logger.Error("readPump panic recovered", "user", user.Name, "docID", docID)
+		}
+		room.mu.Lock()
+		delete(room.clients, cc.conn)
+		h.logger.Info("user left", "name", user.Name, "users", len(room.clients), "docID", docID)
+		room.broadcastPresence()
+		room.mu.Unlock()
+
+		h.removeRoomIfEmpty(docID, room)
+		cc.closeSend()
 		cc.conn.Close()
 	}()
 
@@ -126,10 +126,7 @@ func (cc *ClientConn) readPump() {
 	for {
 		_, raw, err := cc.conn.ReadMessage()
 		if err != nil {
-			if websocket.IsUnexpectedCloseError(err,
-				websocket.CloseGoingAway,
-				websocket.CloseNormalClosure,
-			) {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
 				h.logger.Warn("unexpected close", "user", user.Name, "error", err)
 			}
 			break
@@ -140,77 +137,72 @@ func (cc *ClientConn) readPump() {
 			continue
 		}
 
-		h.mu.Lock()
+		room.mu.Lock()
 		cc.handleMessage(&msg, user)
-		h.mu.Unlock()
+		room.mu.Unlock()
 	}
 }
 
-// handleMessage dispatches a decoded message. Caller must hold h.mu.
 func (cc *ClientConn) handleMessage(msg *Message, user User) {
 	h := cc.hub
+	room := cc.room
 
 	switch msg.Type {
 	case "ping":
-		// Application-level keepalive — respond with pong.
 		pongRaw, _ := json.Marshal(Message{Type: "pong"})
 		cc.safeSend(pongRaw)
 
 	case "restore":
-		// Client wants to restore the document after a server restart.
-		// Only the first restorer populates the empty doc; others get the current state.
-		if h.doc.Len() == 0 && len(msg.Content) > 0 {
+		if room.doc.Len() == 0 && len(msg.Content) > 0 {
 			runes := []rune(msg.Content)
 			for i, ch := range runes {
-				h.clock++
-				newID := crdt.OpID{Clock: h.clock, SiteID: user.ID}
+				room.clock++
+				newID := crdt.OpID{Clock: room.clock, SiteID: user.ID}
 				anchor := crdt.RootID
 				if i > 0 {
-					anchor = crdt.OpID{Clock: h.clock - 1, SiteID: user.ID}
+					anchor = crdt.OpID{Clock: room.clock - 1, SiteID: user.ID}
 				}
-				h.doc.Insert(ch, anchor, newID)
+				room.doc.Insert(ch, anchor, newID)
 			}
-			h.logger.Info("document restored", "user", user.Name, "chars", h.doc.Len())
-		} else {
-			h.logger.Info("restore skipped (doc not empty)", "user", user.Name, "docLen", h.doc.Len())
+			h.logger.Info("document restored", "user", user.Name, "chars", room.doc.Len(), "docID", room.docID)
 		}
-		syncMsg := h.buildFullSync(user.Color)
+		syncMsg := room.buildFullSync(user.Color)
 		syncRaw, _ := json.Marshal(syncMsg)
 		cc.safeSend(syncRaw)
 
 	case "batch_sync":
-		// Client replaying buffered offline operations.
 		var ops []Message
 		if err := json.Unmarshal([]byte(msg.Content), &ops); err == nil {
-			h.logger.Info("batch sync", "user", user.Name, "ops", len(ops))
 			for i := range ops {
-				h.applyOp(&ops[i], user)
+				if !room.applyOp(&ops[i], user, h.logger) {
+					continue
+				}
 				outRaw, _ := json.Marshal(ops[i])
 				cc.safeSend(outRaw)
-				h.broadcastExcept(outRaw, cc.conn)
+				room.broadcastExcept(outRaw, cc.conn)
 			}
-			h.logger.Info("batch complete", "user", user.Name, "docLen", h.doc.Len())
 		}
 
 	case "insert", "delete":
-		h.applyOp(msg, user)
+		if !room.applyOp(msg, user, h.logger) {
+			return
+		}
 		outRaw, _ := json.Marshal(msg)
-		cc.safeSend(outRaw)              // confirm to sender
-		h.broadcastExcept(outRaw, cc.conn) // broadcast to others
+		cc.safeSend(outRaw)
+		room.broadcastExcept(outRaw, cc.conn)
 
 	case "cursor":
 		msg.UserID = user.ID
 		msg.UserName = user.Name
 		msg.Color = user.Color
 		outRaw, _ := json.Marshal(msg)
-		h.broadcastExcept(outRaw, cc.conn)
+		room.broadcastExcept(outRaw, cc.conn)
 
 	case "typing":
-		// Typing indicator broadcast — ephemeral, not logged.
 		msg.UserID = user.ID
 		msg.UserName = user.Name
 		msg.Color = user.Color
 		outRaw, _ := json.Marshal(msg)
-		h.broadcastExcept(outRaw, cc.conn)
+		room.broadcastExcept(outRaw, cc.conn)
 	}
 }

@@ -7,6 +7,7 @@
     <meta name="description" content="Real-time collaborative document editor powered by CRDT and AI">
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌊</text></svg>">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/styles/github-dark.min.css">
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -44,8 +45,18 @@
         <button class="toolbar-btn" id="exportBtn" title="Export document as text file">
             ↓ Export
         </button>
+        <button class="toolbar-btn" id="shareBtn" title="Copy share link">
+            🔗 Share Link
+        </button>
+        <button class="toolbar-btn" id="newRoomBtn" title="Create private room">
+            ✨ New Room
+        </button>
+        <span class="room-chip" id="roomChip">Room: default</span>
         <div class="toolbar-sep"></div>
         <span class="toolbar-info" id="toolbarInfo">CRDT · Goroutines · WebSocket</span>
+        <div class="toolbar-sep"></div>
+        <button class="toolbar-btn" id="writeModeBtn" title="Write mode">✍️ Write</button>
+        <button class="toolbar-btn" id="previewModeBtn" title="Markdown preview">🧠 Preview</button>
         <div class="toolbar-spacer"></div>
         <div class="ai-badge" id="aiBadge">✨ AI Ready</div>
     </div>
@@ -69,6 +80,7 @@
                 <div id="ghost-text"></div>
                 <div id="cursors-overlay"></div>
             </div>
+            <div id="preview" class="preview-pane" aria-live="polite"></div>
         </div>
     </div>
 
@@ -93,5 +105,7 @@
     </div>
 
     <script src="/static/app.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/highlight.min.js"></script>
 </body>
 </html>

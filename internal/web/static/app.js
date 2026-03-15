@@ -22,6 +22,13 @@
     var exportBtn = document.getElementById("exportBtn");
     var typingBar = document.getElementById("typingBar");
     var typingText = document.getElementById("typingText");
+    var shareBtn = document.getElementById("shareBtn");
+    var newRoomBtn = document.getElementById("newRoomBtn");
+    var roomChip = document.getElementById("roomChip");
+    var writeModeBtn = document.getElementById("writeModeBtn");
+    var previewModeBtn = document.getElementById("previewModeBtn");
+    var previewPane = document.getElementById("preview");
+    var pageEl = document.querySelector(".page");
 
     // --- Identity ---
     var userID = "U-" + Math.random().toString(36).substring(2, 6).toUpperCase();
@@ -51,6 +58,13 @@
     var reconnectAttempts = 0;
     var reconnectTimer = null;
     var pendingRestore = false;
+
+    var urlParams = new URLSearchParams(location.search);
+    var docID = urlParams.get("doc_id") || urlParams.get("doc") || "";
+    if (!docID) {
+        docID = generateRoomID();
+        syncRoomURL(docID);
+    }
 
     // The editor content at the moment of last disconnect — used as the "base"
     // for three-way merge when reconnecting with offline edits.
@@ -255,11 +269,136 @@
 
     // --- Old Value Tracking ---
     var oldValue = "";
+    var currentMode = "write";
+    var markdownConfigured = false;
 
     // --- Activity Panel ---
     activityBtn.addEventListener("click", function() {
         activityPanel.classList.toggle("open");
     });
+
+    if (shareBtn) {
+        shareBtn.addEventListener("click", function() {
+            copyShareLink();
+        });
+    }
+
+    if (newRoomBtn) {
+        newRoomBtn.addEventListener("click", function() {
+            createPrivateRoom();
+        });
+    }
+
+    if (writeModeBtn) {
+        writeModeBtn.addEventListener("click", function() {
+            setMode("write");
+        });
+    }
+
+    if (previewModeBtn) {
+        previewModeBtn.addEventListener("click", function() {
+            setMode("preview");
+        });
+    }
+
+    function generateRoomID() {
+        var raw = Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+        return "room-" + raw;
+    }
+
+    function syncRoomURL(room) {
+        var url = new URL(window.location.href);
+        url.searchParams.set("doc_id", room);
+        history.replaceState({}, "", url.toString());
+    }
+
+    function updateRoomChip() {
+        if (!roomChip) return;
+        roomChip.textContent = "Room: " + docID;
+        roomChip.title = "Current room: " + docID;
+    }
+
+    function getShareURL() {
+        return window.location.origin + window.location.pathname + "?doc_id=" + encodeURIComponent(docID);
+    }
+
+    function copyShareLink() {
+        var shareURL = getShareURL();
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(shareURL)
+                .then(function() {
+                    showToast("🔗", "Share link copied");
+                })
+                .catch(function() {
+                    fallbackCopyShareLink(shareURL);
+                });
+            return;
+        }
+        fallbackCopyShareLink(shareURL);
+    }
+
+    function fallbackCopyShareLink(shareURL) {
+        var temp = document.createElement("input");
+        temp.value = shareURL;
+        document.body.appendChild(temp);
+        temp.select();
+        try {
+            document.execCommand("copy");
+            showToast("🔗", "Share link copied");
+        } catch (_) {
+            showToast("⚠️", "Copy failed — URL is in address bar");
+        }
+        document.body.removeChild(temp);
+    }
+
+    function createPrivateRoom() {
+        var newID = generateRoomID();
+        var target = window.location.origin + window.location.pathname + "?doc_id=" + encodeURIComponent(newID);
+        window.location.href = target;
+    }
+
+    function setMode(mode) {
+        currentMode = mode === "preview" ? "preview" : "write";
+        var isPreview = currentMode === "preview";
+        if (pageEl) {
+            pageEl.classList.toggle("preview-mode", isPreview);
+        }
+        if (writeModeBtn) writeModeBtn.classList.toggle("active", !isPreview);
+        if (previewModeBtn) previewModeBtn.classList.toggle("active", isPreview);
+        if (isPreview) {
+            renderPreview();
+        } else {
+            editor.focus();
+        }
+    }
+
+    function renderPreview() {
+        if (!previewPane) return;
+        var source = editor.value || "";
+        if (window.marked && typeof window.marked.parse === "function") {
+            if (!markdownConfigured && window.hljs) {
+                window.marked.setOptions({
+                    breaks: true,
+                    highlight: function(code, lang) {
+                        if (lang && window.hljs.getLanguage(lang)) {
+                            return window.hljs.highlight(code, { language: lang }).value;
+                        }
+                        return window.hljs.highlightAuto(code).value;
+                    }
+                });
+                markdownConfigured = true;
+            }
+            previewPane.innerHTML = window.marked.parse(source);
+            if (window.hljs) {
+                var codeBlocks = previewPane.querySelectorAll("pre code");
+                for (var c = 0; c < codeBlocks.length; c++) {
+                    window.hljs.highlightElement(codeBlocks[c]);
+                }
+            }
+        } else {
+            previewPane.innerHTML = "<pre>" + escapeHtml(source) + "</pre>";
+        }
+    }
 
     // ==========================================
     //   WEBSOCKET CONNECTION
@@ -268,7 +407,7 @@
         var wsUrl;
         try {
             var wsProtocol = location.protocol === "https:" ? "wss://" : "ws://";
-            wsUrl = wsProtocol + location.host + "/ws";
+            wsUrl = wsProtocol + location.host + "/ws?doc_id=" + encodeURIComponent(docID);
             console.log("[SyncWave] Connecting to:", wsUrl);
             addLog("System", "Connecting to WebSocket...");
             ws = new WebSocket(wsUrl);
@@ -287,11 +426,17 @@
             startHealthCheck();
             showToast("🟢", "Connected to SyncWave");
 
+            var hasOfflineEditsOnJoin = wasDisconnected &&
+                lastSyncedContent !== null &&
+                editor.value !== lastSyncedContent &&
+                editor.value.length > 0;
+
             ws.send(JSON.stringify({
                 type: "join",
                 userID: userID,
                 userName: userName,
-                lastSeq: lastSeq
+                lastSeq: lastSeq,
+                hasOfflineEdits: hasOfflineEditsOnJoin
             }));
         };
 
@@ -325,9 +470,82 @@
             // Application-level pong — no action needed, lastMessageTime already updated
             if (msg.type === "pong") return;
 
-            if (msg.seq) lastSeq = msg.seq;
+            var msgSeq = (typeof msg.seq === "number") ? msg.seq : 0;
+            var isOpMsg = msg.type === "insert" || msg.type === "delete";
+            if (isOpMsg && msgSeq > 0 && msgSeq <= lastSeq) {
+                return;
+            }
+            if (msgSeq > lastSeq) lastSeq = msgSeq;
 
             switch (msg.type) {
+                case "replay_sync":
+                    isRemoteUpdate = true;
+                    myColor = msg.color || myColor;
+                    var replayOps = Array.isArray(msg.ops) ? msg.ops : [];
+
+                    for (var ro = 0; ro < replayOps.length; ro++) {
+                        var op = replayOps[ro];
+                        if (!op || !op.type) continue;
+
+                        if (op.type === "insert") {
+                            if (op.userID === userID) {
+                                if (op.newID) {
+                                    for (var rpi = 0; rpi < shadow.length; rpi++) {
+                                        if (shadow[rpi].id.clock < 0) {
+                                            shadow[rpi].id = op.newID;
+                                            break;
+                                        }
+                                    }
+                                }
+                                continue;
+                            }
+
+                            var rInsPos = (op.position != null) ? op.position : 0;
+                            var rInsCh = String.fromCharCode(op.char);
+                            var rSs = editor.selectionStart;
+                            var rSe = editor.selectionEnd;
+
+                            if (op.newID) {
+                                shadowInsert(rInsPos, rInsCh, op.newID);
+                            }
+
+                            var rBefore = editor.value.substring(0, rInsPos);
+                            var rAfter = editor.value.substring(rInsPos);
+                            editor.value = rBefore + rInsCh + rAfter;
+                            editor.selectionStart = (rInsPos <= rSs) ? rSs + 1 : rSs;
+                            editor.selectionEnd = (rInsPos <= rSe) ? rSe + 1 : rSe;
+                        } else if (op.type === "delete") {
+                            if (op.userID === userID) continue;
+
+                            var rDelPos = (op.position != null) ? op.position : -1;
+                            if (rDelPos >= 0 && rDelPos < editor.value.length) {
+                                var rdSs = editor.selectionStart;
+                                var rdSe = editor.selectionEnd;
+
+                                shadowDelete(rDelPos);
+
+                                var rDBefore = editor.value.substring(0, rDelPos);
+                                var rDAfter = editor.value.substring(rDelPos + 1);
+                                editor.value = rDBefore + rDAfter;
+                                editor.selectionStart = (rDelPos < rdSs) ? rdSs - 1 : rdSs;
+                                editor.selectionEnd = (rDelPos < rdSe) ? rdSe - 1 : rdSe;
+                            }
+                        }
+                    }
+
+                    oldValue = editor.value;
+                    wasDisconnected = false;
+                    lastSyncedContent = editor.value;
+                    updateCharCount();
+                    if (replayOps.length > 0) {
+                        addLog("System", "Replayed " + replayOps.length + " changes");
+                    } else {
+                        addLog("System", "Reconnected (no pending changes)");
+                    }
+                    clearSuggestion();
+                    isRemoteUpdate = false;
+                    break;
+
                 case "full_sync":
                     isRemoteUpdate = true;
                     var savedCursor = editor.selectionStart;
@@ -535,10 +753,7 @@
         var delay = Math.min(1000 * Math.pow(2, reconnectAttempts - 1), 30000);
         statusText.textContent = "Reconnecting...";
         addLog("System", "Reconnecting in " + (delay / 1000) + "s...");
-        // Use waitForServer instead of connect() so we confirm the server is
-        // alive before attempting the WebSocket handshake (prevents spin-loops
-        // against a still-restarting Render instance).
-        reconnectTimer = setTimeout(function() { waitForServer(0); }, delay);
+        reconnectTimer = setTimeout(function() { connect(); }, delay);
     }
 
     function setConnectionStatus(status) {
@@ -677,6 +892,7 @@
             cursorEl.style.top = coords.top + "px";
             cursorEl.style.height = coords.height + "px";
             cursorEl.style.backgroundColor = cursor.color;
+            cursorEl.style.color = cursor.color;
 
             var label = document.createElement("div");
             label.className = "remote-cursor-label";
@@ -743,10 +959,14 @@
     function shouldRequestAI() {
         var text = editor.value;
         var pos = editor.selectionStart;
+        var selectionEnd = editor.selectionEnd;
         if (text.length < AI_MIN_LENGTH) return false;
-        if (pos === text.length) return true;
-        var charBefore = text.slice(pos - 1, pos);
-        return charBefore === " " || charBefore === "\n";
+        if (selectionEnd !== pos) return false;
+        if (pos < 0 || pos > text.length) return false;
+
+        // Allow completions in both end-of-line and mid-sentence positions.
+        // This makes better use of right-side context already sent to /api/complete.
+        return true;
     }
 
     function requestAICompletion() {
@@ -768,19 +988,31 @@
             var reader = stream.getReader();
             var decoder = new TextDecoder();
             currentSuggestion = "";
+            var sseBuffer = "";
             function readChunk() {
                 reader.read().then(function(result) {
-                    if (result.done) { setAIStatus("ready", "✨ AI Ready"); return; }
+                    if (result.done) {
+                        var finalChunk = decoder.decode();
+                        if (finalChunk) sseBuffer += finalChunk;
+                        setAIStatus("ready", "✨ AI Ready");
+                        return;
+                    }
                     var chunk = decoder.decode(result.value, { stream: true });
-                    var lines = chunk.split("\n");
+                    sseBuffer += chunk;
+                    var lines = sseBuffer.split("\n");
+                    sseBuffer = lines.pop() || "";
                     for (var i = 0; i < lines.length; i++) {
-                        var line = lines[i];
+                        var line = lines[i].replace(/\r$/, "");
                         if (line.indexOf("data: ") === 0) {
                             var data = line.slice(6);
                             if (data === "[DONE]") { setAIStatus("ready", "✨ Tab to accept"); return; }
                             try {
                                 var parsed = JSON.parse(data);
-                                if (parsed.token) { currentSuggestion += parsed.token; showSuggestion(currentSuggestion); }
+                                if (parsed.token) {
+                                    setAIStatus("streaming", "✨ Streaming...");
+                                    currentSuggestion += parsed.token;
+                                    showSuggestion(currentSuggestion);
+                                }
                                 else if (parsed.error) { setAIStatus("error", "⚠ " + parsed.error); }
                             } catch (e) { /* ignore parse errors from partial chunks */ }
                         }
@@ -884,6 +1116,9 @@
         var words = editor.value.trim() ? editor.value.trim().split(/\s+/).length : 0;
         var bufferInfo = offlineBuffer.length > 0 ? " | " + offlineBuffer.length + " buffered" : "";
         charCountEl.textContent = count + " chars · " + words + " words" + bufferInfo;
+        if (currentMode === "preview") {
+            renderPreview();
+        }
     }
 
     function setAIStatus(type, msg) {
@@ -911,34 +1146,10 @@
     // --- Init ---
     function initApp() {
         oldValue = editor.value;
-        // Poll /health until the server responds. On Render free tier, the
-        // binary serves the HTML itself, so if the page loaded fresh the server
-        // is already up. But if the browser served a cached page while the
-        // server was asleep, we need to wait for it to wake before opening WS.
-        statusText.textContent = "Starting up...";
-        waitForServer(0);
-    }
-
-    function waitForServer(attempt) {
-        console.log("[SyncWave] waitForServer attempt:", attempt);
-        fetch("/health")
-            .then(function(r) {
-                console.log("[SyncWave] /health response:", r.status);
-                return r.json();
-            })
-            .then(function(data) {
-                console.log("[SyncWave] /health data:", data);
-                if (data.status === "no_api_key") setAIStatus("error", "⚠ AI disabled — no key");
-                else setAIStatus("ready", "✨ AI Ready");
-                connect(); // server is definitely up
-            })
-            .catch(function(err) {
-                console.log("[SyncWave] /health failed:", err);
-                // Server not ready yet (cold start) — retry with backoff
-                var delay = Math.min(2000 * Math.pow(1.5, attempt), 15000);
-                statusText.textContent = "Starting up...";
-                addLog("System", "Server waking up, retrying in " + Math.round(delay / 1000) + "s...");
-                setTimeout(function() { waitForServer(attempt + 1); }, delay);
-            });
+        updateRoomChip();
+        setMode("write");
+        setAIStatus("ready", "✨ AI Ready");
+        connect();
+        addLog("System", "Private room active: " + docID);
     }
 })();

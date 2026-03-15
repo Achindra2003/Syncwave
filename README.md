@@ -9,6 +9,7 @@ SyncWave enables multiple users to edit the same document simultaneously — eve
 ## Features
 
 - **Real-Time Collaboration** — Type in one browser tab, see it instantly in another via WebSocket
+- **Multi-Document Rooms** — Collaborate per document using `?doc_id=<your-id>` in the URL
 - **Offline Editing & Sync** — Edits buffer locally during disconnects, with three-way merge on reconnect
 - **CRDT Conflict Resolution** — RGA (Replicated Growable Array) with Lamport timestamps and RGA tie-breaking
 - **AI Writing Assistant** — Streaming ghost-text completions via Groq (llama-3.1-8b-instant); press Tab to accept
@@ -23,7 +24,7 @@ SyncWave enables multiple users to edit the same document simultaneously — eve
 | Goroutines & Channels | Per-client `writePump` goroutine with buffered `chan []byte` ([client.go](internal/hub/client.go)) |
 | Mutexes (`sync.Mutex`) | Hub-level lock protecting shared CRDT document ([hub.go](internal/hub/hub.go)) |
 | `sync.Once` | Safe channel close preventing double-close panics ([client.go](internal/hub/client.go)) |
-| Interfaces & Structs | `Middleware` type, `Config` struct, `Document` API |
+| Interfaces & Structs | `Config` struct, `Document` API |
 | `embed.FS` | Frontend assets embedded in binary ([handler.go](internal/web/handler.go)) |
 | `log/slog` | Structured logging throughout |
 | `net/http` | HTTP server with custom `ServeMux`, middleware chain |
@@ -53,8 +54,6 @@ SyncWave/
 │   │   └── message.go           # Protocol message types
 │   ├── ai/
 │   │   └── assistant.go         # Groq LLM streaming completion
-│   ├── middleware/
-│   │   └── middleware.go         # Logging, recovery, CORS
 │   └── web/
 │       ├── handler.go            # Routes + embedded static file server
 │       ├── static/               # JS, CSS (embedded via go:embed)
@@ -108,12 +107,24 @@ cp .env.example .env
 # Edit .env and add your GROQ_API_KEY
 ```
 
+Current MVP env vars used by the server:
+
+```dotenv
+PORT=8080
+LOG_LEVEL=info
+GROQ_API_KEY=your-key
+```
+
 ### Run
 ```bash
 go run ./cmd/server
 ```
 
 Open **http://localhost:8080** in two or more browser tabs and start typing!
+
+For isolated documents, use URLs like:
+
+`http://localhost:8080/?doc_id=project-plan`
 
 ### Test
 ```bash

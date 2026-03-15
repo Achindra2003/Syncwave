@@ -1,11 +1,7 @@
-// Package web registers HTTP routes and serves the embedded frontend.
-//
-// Static assets (JS, CSS) and the HTML template are embedded into the
-// binary using Go's embed package, eliminating the need to ship separate
-// files alongside the executable.
 package web
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -22,9 +18,11 @@ var staticFiles embed.FS
 //go:embed templates/index.html
 var indexHTML []byte
 
-// RegisterRoutes sets up all HTTP routes on the given mux.
+type completer interface {
+	StreamComplete(ctx context.Context, textBefore, textAfter string) <-chan ai.StreamResult
+}
+
 func RegisterRoutes(mux *http.ServeMux, h *hub.Hub, assistant *ai.Assistant) {
-	// Serve index.html at root — never cache so Render always wakes from sleep
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -33,24 +31,21 @@ func RegisterRoutes(mux *http.ServeMux, h *hub.Hub, assistant *ai.Assistant) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
 		w.Header().Set("Pragma", "no-cache")
-		w.Write(indexHTML)
+		_, _ = w.Write(indexHTML)
 	})
 
-	// Serve static files (JS, CSS) from embedded filesystem
 	staticSub, _ := fs.Sub(staticFiles, "static")
 	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticSub))))
 
-	// WebSocket endpoint
 	mux.HandleFunc("/ws", h.ServeWS)
-
-	// REST API
-	mux.HandleFunc("/api/stats", h.ServeStats)
-	mux.HandleFunc("/api/complete", handleComplete(assistant))
-	mux.HandleFunc("/health", handleHealth(assistant))
+	var c completer
+	if assistant != nil {
+		c = assistant
+	}
+	mux.HandleFunc("/api/complete", handleComplete(c))
 }
 
-// handleComplete streams AI text completions via Server-Sent Events.
-func handleComplete(assistant *ai.Assistant) http.HandlerFunc {
+func handleComplete(assistant completer) http.HandlerFunc {
 	type completeRequest struct {
 		TextBefore string `json:"textBefore"`
 		TextAfter  string `json:"textAfter"`
@@ -61,19 +56,25 @@ func handleComplete(assistant *ai.Assistant) http.HandlerFunc {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-
+		if r.Method != http.MethodPost {
+			w.Header().Set("Content-Type", "application/json")
+			http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
 		if assistant == nil {
+			w.Header().Set("Content-Type", "application/json")
 			http.Error(w, `{"error":"AI not configured. Set GROQ_API_KEY"}`, http.StatusServiceUnavailable)
 			return
 		}
 
 		var req completeRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.Header().Set("Content-Type", "application/json")
 			http.Error(w, `{"error":"Invalid JSON"}`, http.StatusBadRequest)
 			return
 		}
-
 		if len(req.TextBefore) < 10 {
+			w.Header().Set("Content-Type", "application/json")
 			http.Error(w, `{"error":"Text too short (min 10 chars)"}`, http.StatusBadRequest)
 			return
 		}
@@ -84,38 +85,41 @@ func handleComplete(assistant *ai.Assistant) http.HandlerFunc {
 
 		flusher, ok := w.(http.Flusher)
 		if !ok {
+			w.Header().Set("Content-Type", "application/json")
 			http.Error(w, `{"error":"Streaming not supported"}`, http.StatusInternalServerError)
 			return
 		}
 
 		textBefore := req.TextBefore
-		if len(textBefore) > 500 {
-			textBefore = textBefore[len(textBefore)-500:]
+		if len(textBefore) > 2000 {
+			textBefore = textBefore[len(textBefore)-2000:]
 		}
 		textAfter := req.TextAfter
-		if len(textAfter) > 200 {
-			textAfter = textAfter[:200]
+		if len(textAfter) > 900 {
+			textAfter = textAfter[:900]
 		}
 
 		stream := assistant.StreamComplete(r.Context(), textBefore, textAfter)
-
 		for {
 			select {
 			case result, ok := <-stream:
 				if !ok {
-					fmt.Fprintf(w, "data: [DONE]\n\n")
-					flusher.Flush()
+					if err := writeSSE(w, flusher, "[DONE]"); err != nil {
+						return
+					}
 					return
 				}
 				if result.Error != nil {
 					data, _ := json.Marshal(map[string]string{"error": result.Error.Error()})
-					fmt.Fprintf(w, "data: %s\n\n", data)
-					flusher.Flush()
+					if err := writeSSE(w, flusher, string(data)); err != nil {
+						return
+					}
 					return
 				}
 				data, _ := json.Marshal(map[string]string{"token": result.Token})
-				fmt.Fprintf(w, "data: %s\n\n", data)
-				flusher.Flush()
+				if err := writeSSE(w, flusher, string(data)); err != nil {
+					return
+				}
 			case <-r.Context().Done():
 				return
 			}
@@ -123,14 +127,10 @@ func handleComplete(assistant *ai.Assistant) http.HandlerFunc {
 	}
 }
 
-// handleHealth returns the server's health status.
-func handleHealth(assistant *ai.Assistant) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		status := "ready"
-		if assistant == nil {
-			status = "no_api_key"
-		}
-		json.NewEncoder(w).Encode(map[string]string{"status": status})
+func writeSSE(w http.ResponseWriter, flusher http.Flusher, data string) error {
+	if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+		return err
 	}
+	flusher.Flush()
+	return nil
 }

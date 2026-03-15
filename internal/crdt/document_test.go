@@ -133,6 +133,19 @@ func TestGetNodeIDAtVisiblePos(t *testing.T) {
 	}
 }
 
+func TestGetNodeIDAtVisiblePosOutOfRangeReturnsRoot(t *testing.T) {
+	doc := NewDocument()
+	doc.Insert('A', RootID, OpID{1, "x"})
+
+	if got := doc.GetNodeIDAtVisiblePos(-1); got != RootID {
+		t.Fatalf("pos -1: expected RootID, got {%d,%s}", got.Clock, got.SiteID)
+	}
+
+	if got := doc.GetNodeIDAtVisiblePos(5); got != RootID {
+		t.Fatalf("pos 5: expected RootID, got {%d,%s}", got.Clock, got.SiteID)
+	}
+}
+
 func TestGetVisiblePosOfNode(t *testing.T) {
 	doc := NewDocument()
 	doc.Insert('A', RootID, OpID{1, "x"})
@@ -231,8 +244,8 @@ func TestScenarios(t *testing.T) {
 			name: "insert at beginning then end",
 			ops: []op{
 				{"insert", 'B', RootID, OpID{1, "u1"}},
-				{"insert", 'A', RootID, OpID{2, "u1"}},           // before B (higher clock wins)
-				{"insert", 'C', OpID{1, "u1"}, OpID{3, "u1"}},    // after B
+				{"insert", 'A', RootID, OpID{2, "u1"}},        // before B (higher clock wins)
+				{"insert", 'C', OpID{1, "u1"}, OpID{3, "u1"}}, // after B
 			},
 			expected: "ABC",
 		},
@@ -307,5 +320,112 @@ func TestFindNode(t *testing.T) {
 	}
 	if doc.FindNode(OpID{99, "z"}) != nil {
 		t.Error("FindNode returned non-nil for missing node")
+	}
+}
+
+func TestConvergenceSameOpsDifferentArrivalOrders(t *testing.T) {
+	type insertOp struct {
+		char   rune
+		anchor OpID
+		id     OpID
+	}
+
+	applyInserts := func(order []insertOp) string {
+		doc := NewDocument()
+		for _, op := range order {
+			doc.Insert(op.char, op.anchor, op.id)
+		}
+		return doc.String()
+	}
+
+	baseA := insertOp{char: 'A', anchor: RootID, id: OpID{Clock: 1, SiteID: "alice"}}
+	baseB := insertOp{char: 'B', anchor: RootID, id: OpID{Clock: 1, SiteID: "bob"}}
+	afterA := insertOp{char: 'C', anchor: baseA.id, id: OpID{Clock: 2, SiteID: "alice"}}
+	afterB := insertOp{char: 'D', anchor: baseB.id, id: OpID{Clock: 2, SiteID: "bob"}}
+
+	order1 := []insertOp{baseA, baseB, afterA, afterB}
+	order2 := []insertOp{baseB, baseA, afterB, afterA}
+
+	got1 := applyInserts(order1)
+	got2 := applyInserts(order2)
+
+	if got1 != got2 {
+		t.Fatalf("expected convergence, got order1=%q order2=%q", got1, got2)
+	}
+	if got1 != "BDAC" {
+		t.Fatalf("unexpected merged text: got %q, want %q", got1, "BDAC")
+	}
+}
+
+func TestTieBreakDeterministicAcrossArrivalOrders(t *testing.T) {
+	type insertOp struct {
+		char rune
+		id   OpID
+	}
+
+	apply := func(order []insertOp) string {
+		doc := NewDocument()
+		for _, op := range order {
+			doc.Insert(op.char, RootID, op.id)
+		}
+		return doc.String()
+	}
+
+	a := insertOp{char: 'a', id: OpID{Clock: 7, SiteID: "a"}}
+	b := insertOp{char: 'b', id: OpID{Clock: 7, SiteID: "b"}}
+	c := insertOp{char: 'c', id: OpID{Clock: 7, SiteID: "c"}}
+
+	got1 := apply([]insertOp{a, b, c})
+	got2 := apply([]insertOp{c, a, b})
+	got3 := apply([]insertOp{b, c, a})
+
+	if got1 != got2 || got2 != got3 {
+		t.Fatalf("tie-break should be deterministic, got %q %q %q", got1, got2, got3)
+	}
+	if got1 != "cba" {
+		t.Fatalf("unexpected tie-break order: got %q, want %q", got1, "cba")
+	}
+}
+
+func TestOfflineInterleavingDeleteInsertConverges(t *testing.T) {
+	buildBaseDoc := func() *Document {
+		doc := NewDocument()
+		a := OpID{Clock: 1, SiteID: "base"}
+		b := OpID{Clock: 2, SiteID: "base"}
+		c := OpID{Clock: 3, SiteID: "base"}
+		d := OpID{Clock: 4, SiteID: "base"}
+
+		doc.Insert('A', RootID, a)
+		doc.Insert('B', a, b)
+		doc.Insert('C', b, c)
+		doc.Insert('D', c, d)
+		return doc
+	}
+
+	applyUser1Offline := func(doc *Document) {
+		doc.Delete(OpID{Clock: 2, SiteID: "base"})
+		doc.Insert('x', OpID{Clock: 1, SiteID: "base"}, OpID{Clock: 5, SiteID: "u1"})
+	}
+
+	applyUser2Offline := func(doc *Document) {
+		doc.Delete(OpID{Clock: 3, SiteID: "base"})
+		doc.Insert('y', OpID{Clock: 2, SiteID: "base"}, OpID{Clock: 6, SiteID: "u2"})
+	}
+
+	doc1 := buildBaseDoc()
+	applyUser1Offline(doc1)
+	applyUser2Offline(doc1)
+
+	doc2 := buildBaseDoc()
+	applyUser2Offline(doc2)
+	applyUser1Offline(doc2)
+
+	got1 := doc1.String()
+	got2 := doc2.String()
+	if got1 != got2 {
+		t.Fatalf("expected convergence, got doc1=%q doc2=%q", got1, got2)
+	}
+	if got1 != "AxyD" {
+		t.Fatalf("unexpected merged text: got %q, want %q", got1, "AxyD")
 	}
 }

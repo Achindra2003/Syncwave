@@ -1,17 +1,8 @@
-// SyncWave — A distributed collaborative text editor built with Go.
-//
-// This is the application entry point. It loads configuration from
-// environment variables, initializes the AI assistant, collaboration hub,
-// and HTTP server with middleware, then starts listening for connections
-// with graceful shutdown support.
-//
-// Usage:
-//
-//	PORT=8080 GROQ_API_KEY=your_key go run ./cmd/server
 package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -22,69 +13,42 @@ import (
 	"syncwave/internal/ai"
 	"syncwave/internal/config"
 	"syncwave/internal/hub"
-	"syncwave/internal/middleware"
 	"syncwave/internal/web"
 )
 
 func main() {
-	// ── Load Configuration ──────────────────────────────────────────
 	cfg := config.Load()
 
-	// ── Structured Logger ───────────────────────────────────────────
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: cfg.LogLevel,
-	}))
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
 	slog.SetDefault(logger)
 
-	// ── AI Assistant (optional) ─────────────────────────────────────
 	var assistant *ai.Assistant
 	if cfg.GroqAPIKey != "" {
 		var err error
 		assistant, err = ai.NewAssistant(cfg.GroqAPIKey)
 		if err != nil {
 			logger.Error("failed to initialize AI assistant", "error", err)
-		} else {
-			logger.Info("AI assistant initialized", "model", "llama-3.1-8b-instant")
 		}
 	} else {
 		logger.Warn("GROQ_API_KEY not set — AI features disabled")
 	}
 
-	// ── Collaboration Hub ───────────────────────────────────────────
 	h := hub.NewHub(logger)
 
-	// ── HTTP Router & Middleware ─────────────────────────────────────
 	mux := http.NewServeMux()
 	web.RegisterRoutes(mux, h, assistant)
 
-	handler := middleware.Chain(mux,
-		middleware.Recovery(logger),
-		middleware.RequestLogger(logger),
-		middleware.CORS(),
-	)
-
-	// ── HTTP Server ─────────────────────────────────────────────────
 	srv := &http.Server{
-		Addr:        ":" + cfg.Port,
-		Handler:     handler,
+		Addr:        fmt.Sprintf(":%s", cfg.Port),
+		Handler:     mux,
 		IdleTimeout: 120 * time.Second,
-		// ReadTimeout and WriteTimeout deliberately omitted:
-		// - WriteTimeout would kill SSE streams
-		// - ReadTimeout would kill WebSocket upgrade on slow cold starts
-		// gorilla/websocket manages its own per-message deadlines via SetReadDeadline.
 	}
 
-	// ── Graceful Shutdown ───────────────────────────────────────────
-	// Listen for SIGINT (Ctrl+C) or SIGTERM (Docker/Render) to shut
-	// down gracefully, giving active connections time to finish.
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
-		logger.Info("SyncWave server starting",
-			"port", cfg.Port,
-			"ai", cfg.GroqAPIKey != "",
-		)
+		logger.Info("SyncWave server starting", "port", cfg.Port, "ai", assistant != nil)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error("server error", "error", err)
 			os.Exit(1)

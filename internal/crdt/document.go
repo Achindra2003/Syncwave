@@ -195,7 +195,7 @@ func (d *Document) GetNodeIDAtVisiblePos(pos int) OpID {
 		}
 		cur = cur.Next
 	}
-	return d.lastVisibleID()
+	return RootID
 }
 
 // GetAnchorIDForPos returns the OpID of the character just before visible position pos.
@@ -241,13 +241,3 @@ func (d *Document) GetVisibleNodeIDs() []OpID {
 	return ids
 }
 
-func (d *Document) lastVisibleID() OpID {
-	cur := d.Tail
-	for cur != nil && cur != d.Head {
-		if !cur.IsDeleted {
-			return cur.ID
-		}
-		cur = cur.Prev
-	}
-	return RootID
-}

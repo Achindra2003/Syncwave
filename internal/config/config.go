@@ -4,17 +4,27 @@
 package config
 
 import (
+	"encoding/json"
 	"log/slog"
 	"os"
+	"strconv"
+	"strings"
 
 	"github.com/joho/godotenv"
 )
 
 // Config holds all application configuration values.
 type Config struct {
-	Port       string     // HTTP server port (default: "8080")
-	GroqAPIKey string     // API key for Groq LLM service
-	LogLevel   slog.Level // Logging verbosity (info or debug)
+	Port           string            // HTTP server port (default: "8080")
+	GroqAPIKey     string            // API key for Groq LLM service
+	LogLevel       slog.Level        // Logging verbosity (info or debug)
+	DatabaseURL    string            // PostgreSQL DSN (optional)
+	SnapshotEvery  int               // Persist snapshot every N ops (default: 25)
+	AuthSecret     string            // Secret for signed websocket sessions (optional)
+	SessionTTLMin  int               // Session token TTL in minutes (default: 480)
+	RoomKeys       map[string]string // Optional per-room access keys
+	AllowedOrigins []string          // Allowed CORS/WS origins (default: allow all)
+	RedisURL       string            // Redis URL for cross-instance pubsub (optional)
 }
 
 // Load reads configuration from environment variables.
@@ -33,9 +43,46 @@ func Load() *Config {
 		level = slog.LevelDebug
 	}
 
+	snapshotEvery := 25
+	if raw := os.Getenv("SNAPSHOT_EVERY"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			snapshotEvery = n
+		}
+	}
+
+	sessionTTLMin := 480
+	if raw := os.Getenv("SESSION_TTL_MIN"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			sessionTTLMin = n
+		}
+	}
+
+	roomKeys := map[string]string{}
+	if raw := os.Getenv("ROOM_KEYS_JSON"); raw != "" {
+		_ = json.Unmarshal([]byte(raw), &roomKeys)
+	}
+
+	allowedOrigins := []string{}
+	if raw := os.Getenv("ALLOWED_ORIGINS"); raw != "" {
+		parts := strings.Split(raw, ",")
+		for _, p := range parts {
+			origin := strings.TrimSpace(p)
+			if origin != "" {
+				allowedOrigins = append(allowedOrigins, origin)
+			}
+		}
+	}
+
 	return &Config{
-		Port:       port,
-		GroqAPIKey: os.Getenv("GROQ_API_KEY"),
-		LogLevel:   level,
+		Port:           port,
+		GroqAPIKey:     os.Getenv("GROQ_API_KEY"),
+		LogLevel:       level,
+		DatabaseURL:    os.Getenv("DATABASE_URL"),
+		SnapshotEvery:  snapshotEvery,
+		AuthSecret:     os.Getenv("AUTH_SECRET"),
+		SessionTTLMin:  sessionTTLMin,
+		RoomKeys:       roomKeys,
+		AllowedOrigins: allowedOrigins,
+		RedisURL:       os.Getenv("REDIS_URL"),
 	}
 }

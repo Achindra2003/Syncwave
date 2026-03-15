@@ -1,19 +1,12 @@
-// Package hub manages WebSocket connections, the shared CRDT document,
-// and the operation log for a collaborative editing session.
-//
-// Architecture:
-//   - One Hub instance manages all connected clients
-//   - Each client has two goroutines: readPump (reads from WebSocket) and
-//     writePump (writes to WebSocket). All writes are serialized through a
-//     buffered channel to prevent concurrent write panics in gorilla/websocket.
-//   - The Hub's mutex protects the shared CRDT document and client map.
 package hub
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"syncwave/internal/crdt"
@@ -24,32 +17,35 @@ import (
 const maxOpLogSize = 1000
 
 var upgrader = websocket.Upgrader{
-	CheckOrigin:     func(r *http.Request) bool { return true },
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	// Allow 30s for the upgrade handshake (Render cold starts can be slow)
+	CheckOrigin:      func(r *http.Request) bool { return true },
+	ReadBufferSize:   1024,
+	WriteBufferSize:  1024,
 	HandshakeTimeout: 30 * time.Second,
 }
 
-// Hub manages connections, the document, and the operation log.
 type Hub struct {
-	clients  map[*websocket.Conn]*ClientConn
-	doc      *crdt.Document
-	clock    int64
-	opLog    []LogEntry
-	seqNum   int
+	rooms    map[string]*Room
 	mu       sync.Mutex
 	logger   *slog.Logger
 	colors   []string
 	colorIdx int
+	userSeq  uint64
 }
 
-// NewHub creates a new collaboration hub with an empty CRDT document.
+type Room struct {
+	docID   string
+	clients map[*websocket.Conn]*ClientConn
+	doc     *crdt.Document
+	clock   int64
+	opLog   []LogEntry
+	seqNum  int
+	mu      sync.Mutex
+}
+
 func NewHub(logger *slog.Logger) *Hub {
 	return &Hub{
-		clients: make(map[*websocket.Conn]*ClientConn),
-		doc:     crdt.NewDocument(),
-		logger:  logger,
+		rooms:  make(map[string]*Room),
+		logger: logger,
 		colors: []string{
 			"#FF6B6B", "#4ECDC4", "#45B7D1", "#96CEB4",
 			"#FFEAA7", "#DDA0DD", "#98D8C8", "#F7DC6F",
@@ -58,42 +54,94 @@ func NewHub(logger *slog.Logger) *Hub {
 	}
 }
 
-// Shutdown gracefully closes all client connections.
+func newRoom(docID string) *Room {
+	return &Room{
+		docID:   docID,
+		clients: make(map[*websocket.Conn]*ClientConn),
+		doc:     crdt.NewDocument(),
+	}
+}
+
 func (h *Hub) Shutdown() {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	for _, cc := range h.clients {
-		cc.closeSend()
+	rooms := make([]*Room, 0, len(h.rooms))
+	for _, room := range h.rooms {
+		rooms = append(rooms, room)
 	}
-	h.logger.Info("hub shut down", "clients_disconnected", len(h.clients))
+	h.mu.Unlock()
+
+	clientsDisconnected := 0
+	for _, room := range rooms {
+		room.mu.Lock()
+		for _, cc := range room.clients {
+			clientsDisconnected++
+			cc.closeSend()
+		}
+		room.mu.Unlock()
+	}
+	h.logger.Info("hub shut down", "clients_disconnected", clientsDisconnected, "rooms", len(rooms))
 }
 
 func (h *Hub) assignColor() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	color := h.colors[h.colorIdx]
 	h.colorIdx = (h.colorIdx + 1) % len(h.colors)
-	return h.colors[h.colorIdx]
+	return color
 }
 
-func (h *Hub) getUsers() []User {
-	users := make([]User, 0, len(h.clients))
-	for _, cc := range h.clients {
+func (h *Hub) nextUserID() string {
+	seq := atomic.AddUint64(&h.userSeq, 1)
+	return fmt.Sprintf("U-%d", seq)
+}
+
+func (h *Hub) getOrCreateRoom(docID string) *Room {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if room, ok := h.rooms[docID]; ok {
+		return room
+	}
+	room := newRoom(docID)
+	h.rooms[docID] = room
+	h.logger.Info("room created", "docID", docID)
+	return room
+}
+
+func (h *Hub) removeRoomIfEmpty(docID string, expected *Room) {
+	expected.mu.Lock()
+	clientCount := len(expected.clients)
+	expected.mu.Unlock()
+	if clientCount > 0 {
+		return
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if existing, ok := h.rooms[docID]; ok && existing == expected {
+		delete(h.rooms, docID)
+		h.logger.Info("room removed", "docID", docID)
+	}
+}
+
+func (r *Room) getUsers() []User {
+	users := make([]User, 0, len(r.clients))
+	for _, cc := range r.clients {
 		users = append(users, cc.user)
 	}
 	return users
 }
 
-// broadcastPresence sends the current user list to all clients.
-func (h *Hub) broadcastPresence() {
-	users := h.getUsers()
+func (r *Room) broadcastPresence() {
+	users := r.getUsers()
 	msg := Message{Type: "presence", Users: users}
 	raw, _ := json.Marshal(msg)
-	for _, cc := range h.clients {
+	for _, cc := range r.clients {
 		cc.safeSend(raw)
 	}
 }
 
-// broadcastExcept sends a message to all clients except the sender.
-func (h *Hub) broadcastExcept(raw []byte, sender *websocket.Conn) {
-	for ws, cc := range h.clients {
+func (r *Room) broadcastExcept(raw []byte, sender *websocket.Conn) {
+	for ws, cc := range r.clients {
 		if ws == sender {
 			continue
 		}
@@ -101,13 +149,12 @@ func (h *Hub) broadcastExcept(raw []byte, sender *websocket.Conn) {
 	}
 }
 
-// applyOp applies an insert or delete operation to the CRDT document and logs it.
-func (h *Hub) applyOp(msg *Message, user User) {
+func (r *Room) applyOp(msg *Message, user User, logger *slog.Logger) bool {
 	switch msg.Type {
 	case "insert":
 		char := rune(msg.Char)
 		pos := msg.Position
-		docLen := h.doc.Len()
+		docLen := r.doc.Len()
 		if pos < 0 {
 			pos = 0
 		}
@@ -115,172 +162,169 @@ func (h *Hub) applyOp(msg *Message, user User) {
 			pos = docLen
 		}
 
-		// Resolve anchor: use client-sent anchorID if valid, otherwise derive from position
 		var anchorID crdt.OpID
-		if msg.AnchorID != nil && msg.AnchorID.Clock >= 0 && h.doc.FindNode(*msg.AnchorID) != nil {
+		if msg.AnchorID != nil && msg.AnchorID.Clock >= 0 && r.doc.FindNode(*msg.AnchorID) != nil {
 			anchorID = *msg.AnchorID
 		} else {
-			anchorID = h.doc.GetAnchorIDForPos(pos)
+			anchorID = r.doc.GetAnchorIDForPos(pos)
 		}
 
-		h.clock++
-		newID := crdt.OpID{Clock: h.clock, SiteID: user.ID}
-		h.doc.Insert(char, anchorID, newID)
+		r.clock++
+		newID := crdt.OpID{Clock: r.clock, SiteID: user.ID}
+		r.doc.Insert(char, anchorID, newID)
 
 		msg.NewID = &newID
 		msg.AnchorID = &anchorID
-		msg.Position = h.doc.GetVisiblePosOfNode(newID)
+		msg.Position = r.doc.GetVisiblePosOfNode(newID)
 
-		h.logger.Debug("insert",
-			"user", user.Name,
-			"char", string(char),
-			"pos", msg.Position,
-			"docLen", h.doc.Len(),
-		)
+		logger.Debug("insert", "user", user.Name, "char", string(char), "pos", msg.Position, "docID", r.docID)
 
 	case "delete":
+		docLen := r.doc.Len()
+		if docLen == 0 {
+			return false
+		}
+
 		var targetID crdt.OpID
-		if msg.TargetID != nil && msg.TargetID.Clock >= 0 && h.doc.FindNode(*msg.TargetID) != nil {
+		if msg.TargetID != nil && msg.TargetID.Clock >= 0 && r.doc.FindNode(*msg.TargetID) != nil {
 			targetID = *msg.TargetID
 		} else {
-			targetID = h.doc.GetNodeIDAtVisiblePos(msg.Position)
+			if msg.Position < 0 || msg.Position >= docLen {
+				return false
+			}
+			targetID = r.doc.GetNodeIDAtVisiblePos(msg.Position)
 		}
 
-		resolvedPos := h.doc.GetVisiblePosOfNode(targetID)
-		if resolvedPos >= 0 {
-			msg.Position = resolvedPos
+		resolvedPos := r.doc.GetVisiblePosOfNode(targetID)
+		if resolvedPos < 0 {
+			return false
 		}
+		msg.Position = resolvedPos
 		msg.TargetID = &targetID
-		h.doc.Delete(targetID)
+		r.doc.Delete(targetID)
 
-		h.logger.Debug("delete",
-			"user", user.Name,
-			"pos", msg.Position,
-			"docLen", h.doc.Len(),
-		)
+		logger.Debug("delete", "user", user.Name, "pos", msg.Position, "docID", r.docID)
+
+	default:
+		return false
 	}
 
-	// Log the operation
-	h.seqNum++
-	msg.Seq = h.seqNum
+	r.seqNum++
+	msg.Seq = r.seqNum
 	msg.UserID = user.ID
 	msg.UserName = user.Name
 	msg.Color = user.Color
-	h.opLog = append(h.opLog, LogEntry{Seq: h.seqNum, Msg: *msg})
-
-	if len(h.opLog) > maxOpLogSize {
-		h.opLog = h.opLog[len(h.opLog)-maxOpLogSize:]
+	r.opLog = append(r.opLog, LogEntry{Seq: msg.Seq, Msg: *msg})
+	if len(r.opLog) > maxOpLogSize {
+		r.opLog = r.opLog[len(r.opLog)-maxOpLogSize:]
 	}
+
+	return true
 }
 
-// buildFullSync constructs a full_sync message with the complete document state.
-func (h *Hub) buildFullSync(color string) Message {
+func (r *Room) buildFullSync(color string) Message {
 	return Message{
 		Type:    "full_sync",
-		Content: h.doc.String(),
+		Content: r.doc.String(),
 		Color:   color,
-		Seq:     h.seqNum,
-		NodeIDs: h.doc.GetVisibleNodeIDs(),
+		Seq:     r.seqNum,
+		NodeIDs: r.doc.GetVisibleNodeIDs(),
 	}
 }
 
-// ServeWS handles a new WebSocket connection upgrade and starts the
-// client's read/write pump goroutines.
+func (r *Room) buildReplaySync(color string, sinceSeq int) Message {
+	ops := make([]Message, 0)
+	for _, entry := range r.opLog {
+		if entry.Seq > sinceSeq {
+			ops = append(ops, entry.Msg)
+		}
+	}
+	return Message{Type: "replay_sync", Color: color, Seq: r.seqNum, Ops: ops}
+}
+
 func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
-	h.logger.Info("websocket upgrade request",
-		"remoteAddr", r.RemoteAddr,
-		"origin", r.Header.Get("Origin"),
-		"host", r.Host,
-	)
+	h.logger.Info("websocket upgrade request", "remoteAddr", r.RemoteAddr, "host", r.Host)
 
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		h.logger.Error("websocket upgrade failed",
-			"error", err,
-			"remoteAddr", r.RemoteAddr,
-		)
-		// upgrader.Upgrade already wrote an HTTP error response
+		h.logger.Error("websocket upgrade failed", "error", err, "remoteAddr", r.RemoteAddr)
 		return
 	}
 
-	h.logger.Info("websocket upgrade succeeded", "remoteAddr", r.RemoteAddr)
-
-	// Set a timeout for the initial join message
 	ws.SetReadDeadline(time.Now().Add(10 * time.Second))
-
 	var joinMsg Message
 	if err := ws.ReadJSON(&joinMsg); err != nil {
 		h.logger.Warn("join message read failed", "error", err)
 		ws.Close()
 		return
 	}
-
-	// Clear the deadline — readPump will set its own
 	ws.SetReadDeadline(time.Time{})
 
-	h.mu.Lock()
-
-	user := User{
-		ID:    joinMsg.UserID,
-		Name:  joinMsg.UserName,
-		Color: h.assignColor(),
+	docID := r.URL.Query().Get("doc_id")
+	if docID == "" {
+		docID = "default"
 	}
+	room := h.getOrCreateRoom(docID)
 
-	cc := newClientConn(h, ws, user)
-	h.clients[ws] = cc
+	name := joinMsg.UserName
+	if name == "" {
+		name = "Anonymous"
+	}
+	user := User{ID: h.nextUserID(), Name: name, Color: h.assignColor()}
+	cc := newClientConn(h, room, ws, user)
 
-	if joinMsg.LastSeq > 0 {
-		// Reconnect: send full doc + missed ops
-		h.logger.Info("user reconnected",
-			"name", user.Name,
-			"lastSeq", joinMsg.LastSeq,
-			"currentSeq", h.seqNum,
-		)
-
-		syncMsg := h.buildFullSync(user.Color)
-		syncRaw, _ := json.Marshal(syncMsg)
-		cc.safeSend(syncRaw)
-
-		missed := 0
-		for _, entry := range h.opLog {
-			if entry.Seq > joinMsg.LastSeq && entry.Msg.UserID != user.ID {
-				raw, _ := json.Marshal(entry.Msg)
-				cc.safeSend(raw)
-				missed++
-			}
-		}
-		h.logger.Info("sent missed ops", "name", user.Name, "count", missed)
+	room.mu.Lock()
+	room.clients[ws] = cc
+	if joinMsg.LastSeq > 0 && !joinMsg.HasOfflineEdits && joinMsg.LastSeq <= room.seqNum {
+		replay := room.buildReplaySync(user.Color, joinMsg.LastSeq)
+		replayRaw, _ := json.Marshal(replay)
+		cc.safeSend(replayRaw)
 	} else {
-		// First connect
-		syncMsg := h.buildFullSync(user.Color)
-		syncRaw, _ := json.Marshal(syncMsg)
+		sync := room.buildFullSync(user.Color)
+		syncRaw, _ := json.Marshal(sync)
 		cc.safeSend(syncRaw)
-		h.logger.Info("user joined", "name", user.Name, "users", len(h.clients))
 	}
+	room.broadcastPresence()
+	room.mu.Unlock()
 
-	h.broadcastPresence()
-	h.mu.Unlock()
-
-	// Start the write pump in a separate goroutine — handles all writes
-	// including pings for keepalive.
 	go cc.writePump()
-
-	// Read pump runs in this goroutine (blocks until connection closes)
 	cc.readPump()
 }
 
-// ServeStats returns a JSON snapshot of the hub's current state.
 func (h *Hub) ServeStats(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
+	roomsCopy := make(map[string]*Room, len(h.rooms))
+	for docID, room := range h.rooms {
+		roomsCopy[docID] = room
+	}
+	h.mu.Unlock()
+
+	totalUsers := 0
+	roomStats := make([]map[string]interface{}, 0, len(roomsCopy))
+	for docID, room := range roomsCopy {
+		room.mu.Lock()
+		users := len(room.clients)
+		docLength := room.doc.Len()
+		opLogSize := len(room.opLog)
+		seqNum := room.seqNum
+		room.mu.Unlock()
+
+		totalUsers += users
+		roomStats = append(roomStats, map[string]interface{}{
+			"docID":     docID,
+			"users":     users,
+			"docLength": docLength,
+			"opLogSize": opLogSize,
+			"seqNum":    seqNum,
+		})
+	}
 
 	stats := map[string]interface{}{
-		"users":      len(h.clients),
-		"docLength":  h.doc.Len(),
-		"opLogSize":  len(h.opLog),
-		"seqNum":     h.seqNum,
+		"rooms":      len(roomsCopy),
+		"users":      totalUsers,
+		"roomStats":  roomStats,
 		"serverTime": time.Now().Format("15:04:05"),
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(stats)
+	_ = json.NewEncoder(w).Encode(stats)
 }

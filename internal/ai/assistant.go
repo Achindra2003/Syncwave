@@ -6,7 +6,9 @@ package ai
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tmc/langchaingo/llms"
 	"github.com/tmc/langchaingo/llms/openai"
@@ -17,6 +19,7 @@ type Assistant struct {
 	llm        *openai.LLM
 	model      string
 	maxContext int
+	maxAfter   int
 	timeout    time.Duration
 }
 
@@ -40,7 +43,8 @@ func NewAssistant(apiKey string) (*Assistant, error) {
 	return &Assistant{
 		llm:        llm,
 		model:      "llama-3.1-8b-instant",
-		maxContext: 500,
+		maxContext: 1600,
+		maxAfter:   700,
 		timeout:    15 * time.Second,
 	}, nil
 }
@@ -56,48 +60,116 @@ func (a *Assistant) StreamComplete(ctx context.Context, textBefore, textAfter st
 		ctx, cancel := context.WithTimeout(ctx, a.timeout)
 		defer cancel()
 
-		prompt := a.buildPrompt(textBefore, textAfter)
+		before := trimTailRunes(textBefore, a.maxContext)
+		after := trimHeadRunes(textAfter, a.maxAfter)
+		prompt := a.buildPrompt(before, after)
 
 		_, err := a.llm.GenerateContent(ctx,
 			[]llms.MessageContent{
 				llms.TextParts(llms.ChatMessageTypeHuman, prompt),
 			},
 			llms.WithStreamingFunc(func(ctx context.Context, chunk []byte) error {
-				resultChan <- StreamResult{Token: string(chunk)}
+				if !sendStreamResult(ctx, resultChan, StreamResult{Token: string(chunk)}) {
+					return ctx.Err()
+				}
 				return nil
 			}),
 		)
 
 		if err != nil {
-			resultChan <- StreamResult{Error: err}
+			sendStreamResult(ctx, resultChan, StreamResult{Error: err})
 		}
 	}()
 
 	return resultChan
 }
 
-func (a *Assistant) buildPrompt(textBefore, textAfter string) string {
-	afterCtx := ""
-	if len(textAfter) > 0 {
-		if len(textAfter) > 200 {
-			textAfter = textAfter[:200]
-		}
-		afterCtx = fmt.Sprintf("\n\nText AFTER the cursor (for context only — do NOT repeat this):\n\"\"\"%s\"\"\"", textAfter)
+func sendStreamResult(ctx context.Context, out chan<- StreamResult, result StreamResult) bool {
+	if ctx.Err() != nil {
+		return false
 	}
 
-	return fmt.Sprintf(`You are an inline autocomplete assistant for a collaborative document editor. Insert text at the cursor position.
+	select {
+	case <-ctx.Done():
+		return false
+	case out <- result:
+		return true
+	}
+}
+
+func (a *Assistant) buildPrompt(textBefore, textAfter string) string {
+	leftLocal := tailByLineCount(textBefore, 5)
+	rightLocal := headByLineCount(textAfter, 5)
+
+	return fmt.Sprintf(`You are an inline autocomplete assistant for a collaborative document editor.
+Your task: generate text to insert exactly at [CURSOR].
 
 Rules:
-- Output ONLY the words/phrases to insert at the cursor. Nothing else.
-- Keep it natural and contextually appropriate (use both before and after context).
-- Maximum 30 words. Prefer short, useful completions (5-15 words).
-- Do NOT repeat any text that already exists before or after the cursor.
-- If mid-sentence, complete the sentence naturally.
-- If between sentences, suggest a connecting sentence.
-- Match the tone, style, and language of the surrounding text.
+- Output ONLY the inserted text, no quotes, labels, markdown, or explanations.
+- Use BOTH left and right context. The completion must flow naturally into the existing right context.
+- Prefer precise continuation over generic filler.
+- Keep completion concise (usually 5-20 words, hard max 40 words).
+- Do NOT repeat text already present around the cursor.
+- If right context already starts a complete continuation, output an empty string.
 
-Text BEFORE the cursor:
-"""%s"""%s
+Full surrounding context:
+"""
+%s[CURSOR]%s
+"""
 
-Insert at cursor:`, textBefore, afterCtx)
+Immediate left context (closest lines):
+"""
+%s
+"""
+
+Immediate right context (closest lines):
+"""
+%s
+"""
+
+Insert text at [CURSOR]:`, textBefore, textAfter, leftLocal, rightLocal)
+}
+
+func trimTailRunes(text string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	if utf8.RuneCountInString(text) <= maxRunes {
+		return text
+	}
+	runes := []rune(text)
+	return string(runes[len(runes)-maxRunes:])
+}
+
+func trimHeadRunes(text string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	if utf8.RuneCountInString(text) <= maxRunes {
+		return text
+	}
+	runes := []rune(text)
+	return string(runes[:maxRunes])
+}
+
+func tailByLineCount(text string, lines int) string {
+	if lines <= 0 || text == "" {
+		return ""
+	}
+	parts := strings.Split(text, "\n")
+	if len(parts) <= lines {
+		return text
+	}
+	return strings.Join(parts[len(parts)-lines:], "\n")
+}
+
+func headByLineCount(text string, lines int) string {
+	if lines <= 0 || text == "" {
+		return ""
+	}
+	parts := strings.Split(text, "\n")
+	if len(parts) <= lines {
+		return text
+	}
+	return strings.Join(parts[:lines], "\n")
 }
