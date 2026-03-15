@@ -33,6 +33,7 @@ type Message struct {
 	AnchorID        *crdt.OpID  `json:"anchorID,omitempty"` // insert: character to insert after
 	TargetID        *crdt.OpID  `json:"targetID,omitempty"` // delete: character to tombstone
 	NewID           *crdt.OpID  `json:"newID,omitempty"`    // server-assigned OpID for inserts
+	ClientOpID      string      `json:"clientOpID,omitempty"`
 	NodeIDs         []crdt.OpID `json:"nodeIDs,omitempty"`  // full_sync: ordered visible node IDs
 }
 

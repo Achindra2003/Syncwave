@@ -77,6 +77,8 @@
     // Mirrors the server's visible document state for position<->OpID mapping.
     var shadow = [];
     var placeholderCounter = 0;
+    var clientOpCounter = 0;
+    var pendingInsertPlaceholders = {};
     var ROOT_ID = { clock: 0, siteID: "ROOT" };
 
     // --- Client-side health check ---
@@ -243,6 +245,40 @@
             }
         }
         return -1;
+    }
+
+    function replacePlaceholderID(oldID, newID) {
+        var pos = shadowFindPos(oldID);
+        if (pos >= 0) {
+            shadow[pos].id = newID;
+            return true;
+        }
+        return false;
+    }
+
+    function applySelfInsertAck(op) {
+        if (!op || !op.newID) return;
+
+        if (op.clientOpID && pendingInsertPlaceholders[op.clientOpID]) {
+            var placeholder = pendingInsertPlaceholders[op.clientOpID];
+            if (replacePlaceholderID(placeholder, op.newID)) {
+                delete pendingInsertPlaceholders[op.clientOpID];
+                return;
+            }
+            delete pendingInsertPlaceholders[op.clientOpID];
+        }
+
+        for (var pi = 0; pi < shadow.length; pi++) {
+            if (shadow[pi].id.clock < 0) {
+                shadow[pi].id = op.newID;
+                return;
+            }
+        }
+    }
+
+    function nextClientOpID() {
+        clientOpCounter++;
+        return userID + "-" + Date.now().toString(36) + "-" + clientOpCounter;
     }
 
     function rebuildShadow(content, nodeIDs) {
@@ -507,14 +543,7 @@
 
                         if (op.type === "insert") {
                             if (op.userID === effectiveUserID) {
-                                if (op.newID) {
-                                    for (var rpi = 0; rpi < shadow.length; rpi++) {
-                                        if (shadow[rpi].id.clock < 0) {
-                                            shadow[rpi].id = op.newID;
-                                            break;
-                                        }
-                                    }
-                                }
+                                applySelfInsertAck(op);
                                 continue;
                             }
 
@@ -566,6 +595,7 @@
 
                 case "full_sync":
                     isRemoteUpdate = true;
+                    pendingInsertPlaceholders = {};
                     var savedCursor = editor.selectionStart;
                     var serverContent = (msg.content != null) ? msg.content : "";
                     var localText = editor.value;
@@ -661,14 +691,7 @@
                 case "insert":
                     if (pendingRestore) break;
                     if (msg.userID === effectiveUserID) {
-                        if (msg.newID) {
-                            for (var pi = 0; pi < shadow.length; pi++) {
-                                if (shadow[pi].id.clock < 0) {
-                                    shadow[pi].id = msg.newID;
-                                    break;
-                                }
-                            }
-                        }
+                        applySelfInsertAck(msg);
                         lastSyncedContent = editor.value;
                         break;
                     }
@@ -870,13 +893,17 @@
             placeholderCounter++;
             var placeholderID = { clock: -placeholderCounter, siteID: userID };
             var ch = insertedStr.charAt(ins);
+            var clientOpID = nextClientOpID();
 
             ops.push({
                 type: "insert",
                 char: ch.charCodeAt(0),
                 position: insPos,
-                anchorID: anchorID
+                anchorID: anchorID,
+                clientOpID: clientOpID
             });
+
+            pendingInsertPlaceholders[clientOpID] = placeholderID;
 
             shadowInsert(insPos, ch, placeholderID);
         }
