@@ -96,7 +96,7 @@ SyncWave/
 ## Getting Started
 
 ### Prerequisites
-- [Go 1.22+](https://go.dev/dl/)
+- [Go 1.24+](https://go.dev/dl/)
 - A [Groq API key](https://console.groq.com/keys) (optional, for AI features)
 
 ### Setup
@@ -113,6 +113,7 @@ Current MVP env vars used by the server:
 PORT=8080
 LOG_LEVEL=info
 GROQ_API_KEY=your-key
+SQLITE_PATH=data/syncwave.db
 ```
 
 ### Run
@@ -122,13 +123,26 @@ go run ./cmd/server
 
 Open **http://localhost:8080** in two or more browser tabs and start typing!
 
-For isolated documents, use URLs like:
-
-`http://localhost:8080/?doc_id=project-plan`
+Product flow:
+- Open `/` to create or access documents.
+- Editor route is `/editor?doc_id=<document-id>`.
 
 ### Test
 ```bash
 go test ./internal/crdt/ -v
+```
+
+### Load Test (CRDT + Concurrency)
+Run multi-client websocket stress test against local or deployed URL:
+
+```bash
+go run ./cmd/loadtest -base https://syncwave-67yw.onrender.com -create=true -clients 12 -seconds 30 -ops 4
+```
+
+Example with existing document:
+
+```bash
+go run ./cmd/loadtest -base https://syncwave-67yw.onrender.com -doc doc-abc123 -clients 20 -seconds 45 -ops 5
 ```
 
 ### Deploy with Docker
