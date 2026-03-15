@@ -34,6 +34,7 @@ func main() {
 	}
 
 	h := hub.NewHub(logger)
+	h.ConfigureAllowedOrigins(cfg.AllowedOrigins)
 
 	mux := http.NewServeMux()
 	web.RegisterRoutes(mux, h, assistant)

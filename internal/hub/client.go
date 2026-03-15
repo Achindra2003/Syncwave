@@ -166,7 +166,7 @@ func (cc *ClientConn) handleMessage(msg *Message, user User) {
 			}
 			h.logger.Info("document restored", "user", user.Name, "chars", room.doc.Len(), "docID", room.docID)
 		}
-		syncMsg := room.buildFullSync(user.Color)
+		syncMsg := room.buildFullSync(user.ID, user.Color)
 		syncRaw, _ := json.Marshal(syncMsg)
 		cc.safeSend(syncRaw)
 

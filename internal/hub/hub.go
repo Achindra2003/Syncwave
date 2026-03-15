@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -30,6 +31,9 @@ type Hub struct {
 	colors   []string
 	colorIdx int
 	userSeq  uint64
+
+	strictOrigin   bool
+	allowedOrigins map[string]struct{}
 }
 
 type Room struct {
@@ -44,14 +48,53 @@ type Room struct {
 
 func NewHub(logger *slog.Logger) *Hub {
 	return &Hub{
-		rooms:  make(map[string]*Room),
-		logger: logger,
+		rooms:          make(map[string]*Room),
+		logger:         logger,
+		allowedOrigins: make(map[string]struct{}),
 		colors: []string{
 			"#FF6B6B", "#4ECDC4", "#45B7D1", "#96CEB4",
 			"#FFEAA7", "#DDA0DD", "#98D8C8", "#F7DC6F",
 			"#BB8FCE", "#85C1E9", "#F0B27A", "#82E0AA",
 		},
 	}
+}
+
+func (h *Hub) ConfigureAllowedOrigins(origins []string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	h.allowedOrigins = make(map[string]struct{})
+	for _, origin := range origins {
+		h.allowedOrigins[origin] = struct{}{}
+	}
+	h.strictOrigin = len(h.allowedOrigins) > 0
+}
+
+func (h *Hub) isOriginAllowed(r *http.Request) bool {
+	h.mu.Lock()
+	strict := h.strictOrigin
+	allowed := make(map[string]struct{}, len(h.allowedOrigins))
+	for origin := range h.allowedOrigins {
+		allowed[origin] = struct{}{}
+	}
+	h.mu.Unlock()
+
+	if !strict {
+		return true
+	}
+
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	normalized := u.Scheme + "://" + u.Host
+	_, ok := allowed[normalized]
+	return ok
 }
 
 func newRoom(docID string) *Room {
@@ -222,9 +265,10 @@ func (r *Room) applyOp(msg *Message, user User, logger *slog.Logger) bool {
 	return true
 }
 
-func (r *Room) buildFullSync(color string) Message {
+func (r *Room) buildFullSync(userID, color string) Message {
 	return Message{
 		Type:    "full_sync",
+		UserID:  userID,
 		Content: r.doc.String(),
 		Color:   color,
 		Seq:     r.seqNum,
@@ -232,18 +276,23 @@ func (r *Room) buildFullSync(color string) Message {
 	}
 }
 
-func (r *Room) buildReplaySync(color string, sinceSeq int) Message {
+func (r *Room) buildReplaySync(userID, color string, sinceSeq int) Message {
 	ops := make([]Message, 0)
 	for _, entry := range r.opLog {
 		if entry.Seq > sinceSeq {
 			ops = append(ops, entry.Msg)
 		}
 	}
-	return Message{Type: "replay_sync", Color: color, Seq: r.seqNum, Ops: ops}
+	return Message{Type: "replay_sync", UserID: userID, Color: color, Seq: r.seqNum, Ops: ops}
 }
 
 func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	h.logger.Info("websocket upgrade request", "remoteAddr", r.RemoteAddr, "host", r.Host)
+	if !h.isOriginAllowed(r) {
+		h.logger.Warn("websocket origin blocked", "origin", r.Header.Get("Origin"))
+		http.Error(w, "origin not allowed", http.StatusForbidden)
+		return
+	}
 
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -276,11 +325,11 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	room.mu.Lock()
 	room.clients[ws] = cc
 	if joinMsg.LastSeq > 0 && !joinMsg.HasOfflineEdits && joinMsg.LastSeq <= room.seqNum {
-		replay := room.buildReplaySync(user.Color, joinMsg.LastSeq)
+		replay := room.buildReplaySync(user.ID, user.Color, joinMsg.LastSeq)
 		replayRaw, _ := json.Marshal(replay)
 		cc.safeSend(replayRaw)
 	} else {
-		sync := room.buildFullSync(user.Color)
+		sync := room.buildFullSync(user.ID, user.Color)
 		syncRaw, _ := json.Marshal(sync)
 		cc.safeSend(syncRaw)
 	}

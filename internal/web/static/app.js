@@ -32,6 +32,7 @@
 
     // --- Identity ---
     var userID = "U-" + Math.random().toString(36).substring(2, 6).toUpperCase();
+    var assignedUserID = "";
     var userName = "Anonymous";
     var myColor = "#7a5cff";
     var isRemoteUpdate = false;
@@ -115,7 +116,16 @@
         if (!toastContainer) return;
         var toast = document.createElement("div");
         toast.className = "toast";
-        toast.innerHTML = '<span class="toast-icon">' + icon + '</span><span>' + message + '</span>';
+
+        var iconSpan = document.createElement("span");
+        iconSpan.className = "toast-icon";
+        iconSpan.textContent = icon;
+
+        var messageSpan = document.createElement("span");
+        messageSpan.textContent = message;
+
+        toast.appendChild(iconSpan);
+        toast.appendChild(messageSpan);
         toastContainer.appendChild(toast);
         setTimeout(function() {
             if (toast.parentNode) toast.parentNode.removeChild(toast);
@@ -388,7 +398,12 @@
                 });
                 markdownConfigured = true;
             }
-            previewPane.innerHTML = window.marked.parse(source);
+            var rawHtml = window.marked.parse(source);
+            if (window.DOMPurify && typeof window.DOMPurify.sanitize === "function") {
+                previewPane.innerHTML = window.DOMPurify.sanitize(rawHtml);
+            } else {
+                previewPane.innerHTML = "<pre>" + escapeHtml(source) + "</pre>";
+            }
             if (window.hljs) {
                 var codeBlocks = previewPane.querySelectorAll("pre code");
                 for (var c = 0; c < codeBlocks.length; c++) {
@@ -477,6 +492,12 @@
             }
             if (msgSeq > lastSeq) lastSeq = msgSeq;
 
+            if ((msg.type === "full_sync" || msg.type === "replay_sync") && msg.userID) {
+                assignedUserID = msg.userID;
+            }
+
+            var effectiveUserID = assignedUserID || userID;
+
             switch (msg.type) {
                 case "replay_sync":
                     isRemoteUpdate = true;
@@ -488,7 +509,7 @@
                         if (!op || !op.type) continue;
 
                         if (op.type === "insert") {
-                            if (op.userID === userID) {
+                            if (op.userID === effectiveUserID) {
                                 if (op.newID) {
                                     for (var rpi = 0; rpi < shadow.length; rpi++) {
                                         if (shadow[rpi].id.clock < 0) {
@@ -515,7 +536,7 @@
                             editor.selectionStart = (rInsPos <= rSs) ? rSs + 1 : rSs;
                             editor.selectionEnd = (rInsPos <= rSe) ? rSe + 1 : rSe;
                         } else if (op.type === "delete") {
-                            if (op.userID === userID) continue;
+                            if (op.userID === effectiveUserID) continue;
 
                             var rDelPos = (op.position != null) ? op.position : -1;
                             if (rDelPos >= 0 && rDelPos < editor.value.length) {
@@ -642,7 +663,7 @@
 
                 case "insert":
                     if (pendingRestore) break;
-                    if (msg.userID === userID) {
+                    if (msg.userID === effectiveUserID) {
                         if (msg.newID) {
                             for (var pi = 0; pi < shadow.length; pi++) {
                                 if (shadow[pi].id.clock < 0) {
@@ -678,7 +699,7 @@
 
                 case "delete":
                     if (pendingRestore) break;
-                    if (msg.userID === userID) break;
+                    if (msg.userID === effectiveUserID) break;
                     isRemoteUpdate = true;
                     var dpos = (msg.position != null) ? msg.position : -1;
                     if (dpos >= 0 && dpos < editor.value.length) {
@@ -700,7 +721,7 @@
                     break;
 
                 case "cursor":
-                    if (msg.userID !== userID) {
+                    if (msg.userID !== effectiveUserID) {
                         remoteCursors[msg.userID] = {
                             position: msg.position,
                             userName: msg.userName,
@@ -738,7 +759,7 @@
                     break;
 
                 case "typing":
-                    if (msg.userID !== userID && msg.userName) {
+                    if (msg.userID !== effectiveUserID && msg.userName) {
                         handleTypingIndicator(msg.userName);
                     }
                     break;
@@ -1097,7 +1118,12 @@
             div.className = "avatar";
             div.style.background = u.color;
             div.textContent = u.name.charAt(0).toUpperCase();
-            div.innerHTML += '<span class="tooltip">' + u.name + '</span>';
+
+            var tooltip = document.createElement("span");
+            tooltip.className = "tooltip";
+            tooltip.textContent = u.name;
+            div.appendChild(tooltip);
+
             avatarsDiv.appendChild(div);
         }
         statusText.textContent = users.length + (users.length === 1 ? " editor" : " editors");
@@ -1106,7 +1132,14 @@
     function addLog(who, text) {
         var entry = document.createElement("div");
         entry.className = "log-entry";
-        entry.innerHTML = '<span class="who">' + who + '</span> ' + text;
+
+        var whoEl = document.createElement("span");
+        whoEl.className = "who";
+        whoEl.textContent = who;
+
+        entry.appendChild(whoEl);
+        entry.appendChild(document.createTextNode(" " + text));
+
         logContainer.prepend(entry);
         while (logContainer.children.length > 50) logContainer.removeChild(logContainer.lastChild);
     }
