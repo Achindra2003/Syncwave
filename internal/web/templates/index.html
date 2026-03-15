@@ -7,7 +7,6 @@
     <meta name="description" content="Real-time collaborative document editor powered by CRDT and AI">
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌊</text></svg>">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/styles/github-dark.min.css">
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -42,21 +41,26 @@
 
     <!-- Toolbar -->
     <div class="toolbar">
-        <button class="toolbar-btn" id="exportBtn" title="Export document as text file">
-            ↓ Export
+        <button class="toolbar-btn" id="exportTxtBtn" title="Export document as text file">
+            ↓ TXT
+        </button>
+        <button class="toolbar-btn" id="exportDocxBtn" title="Export document as Word file">
+            ↓ DOCX
+        </button>
+        <button class="toolbar-btn" id="exportPdfBtn" title="Export document as PDF">
+            ↓ PDF
         </button>
         <button class="toolbar-btn" id="shareBtn" title="Copy share link">
             🔗 Share Link
         </button>
-        <button class="toolbar-btn" id="newRoomBtn" title="Create private room">
-            ✨ New Room
+        <button class="toolbar-btn" id="newDocBtn" title="Create new document">
+            ✨ New Document
         </button>
-        <span class="room-chip" id="roomChip">Room: default</span>
+        <button class="toolbar-btn" id="offlineTestBtn" title="Temporarily disconnect this tab to test offline sync">
+            📶 Offline Test
+        </button>
         <div class="toolbar-sep"></div>
         <span class="toolbar-info" id="toolbarInfo">CRDT · Goroutines · WebSocket</span>
-        <div class="toolbar-sep"></div>
-        <button class="toolbar-btn" id="writeModeBtn" title="Write mode">✍️ Write</button>
-        <button class="toolbar-btn" id="previewModeBtn" title="Markdown preview">🧠 Preview</button>
         <div class="toolbar-spacer"></div>
         <div class="ai-badge" id="aiBadge">✨ AI Ready</div>
     </div>
@@ -80,7 +84,6 @@
                 <div id="ghost-text"></div>
                 <div id="cursors-overlay"></div>
             </div>
-            <div id="preview" class="preview-pane" aria-live="polite"></div>
         </div>
     </div>
 
@@ -105,8 +108,8 @@
     </div>
 
     <script src="/static/app.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/docx/8.5.0/docx.min.js"></script>
 </body>
 </html>

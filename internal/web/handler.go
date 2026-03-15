@@ -31,6 +31,8 @@ type completer interface {
 type documentService interface {
 	CreateDocument(title string) (docs.Doc, error)
 	ListDocuments(limit int) ([]docs.Doc, error)
+	GetDocument(docID string) (docs.Doc, error)
+	UpdateDocumentTitle(docID string, title string) (docs.Doc, error)
 }
 
 func RegisterRoutes(mux *http.ServeMux, h *hub.Hub, assistant *ai.Assistant, docService documentService) {
@@ -57,6 +59,7 @@ func RegisterRoutes(mux *http.ServeMux, h *hub.Hub, assistant *ai.Assistant, doc
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
 	mux.HandleFunc("/api/docs", handleDocs(docService))
+	mux.HandleFunc("/api/docs/", handleDocByID(docService))
 
 	mux.HandleFunc("/ws", h.ServeWS)
 	var c completer
@@ -114,6 +117,62 @@ func handleDocs(docService documentService) http.HandlerFunc {
 				"document": doc,
 				"url":      "/editor?doc_id=" + doc.ID,
 			})
+			return
+
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+	}
+}
+
+func handleDocByID(docService documentService) http.HandlerFunc {
+	type updateTitleRequest struct {
+		Title string `json:"title"`
+	}
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		if docService == nil {
+			w.Header().Set("Content-Type", "application/json")
+			http.Error(w, `{"error":"Document service unavailable"}`, http.StatusServiceUnavailable)
+			return
+		}
+
+		docID := strings.TrimPrefix(r.URL.Path, "/api/docs/")
+		docID = strings.TrimSpace(docID)
+		if docID == "" {
+			w.Header().Set("Content-Type", "application/json")
+			http.Error(w, `{"error":"Document ID is required"}`, http.StatusBadRequest)
+			return
+		}
+
+		switch r.Method {
+		case http.MethodGet:
+			doc, err := docService.GetDocument(docID)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				http.Error(w, `{"error":"Document not found"}`, http.StatusNotFound)
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"document": doc})
+			return
+
+		case http.MethodPatch:
+			var req updateTitleRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+
+			doc, err := docService.UpdateDocumentTitle(docID, req.Title)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				http.Error(w, `{"error":"Failed to update document"}`, http.StatusInternalServerError)
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"document": doc})
 			return
 
 		default:

@@ -96,6 +96,31 @@ func (s *Service) GetDocument(docID string) (Doc, error) {
 	return doc, nil
 }
 
+func (s *Service) UpdateDocumentTitle(docID string, title string) (Doc, error) {
+	normalizedTitle := strings.TrimSpace(title)
+	if normalizedTitle == "" {
+		normalizedTitle = "Untitled Document"
+	}
+
+	res, err := s.db.Exec(
+		`UPDATE documents
+         SET title = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+		normalizedTitle,
+		docID,
+	)
+	if err != nil {
+		return Doc{}, fmt.Errorf("update document title: %w", err)
+	}
+
+	updatedRows, err := res.RowsAffected()
+	if err == nil && updatedRows == 0 {
+		return Doc{}, fmt.Errorf("update document title: document not found")
+	}
+
+	return s.GetDocument(docID)
+}
+
 func (s *Service) ListDocuments(limit int) ([]Doc, error) {
 	if limit <= 0 {
 		limit = 50

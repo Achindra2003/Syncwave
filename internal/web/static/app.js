@@ -19,16 +19,15 @@
     var nameInput = document.getElementById("nameInput");
     var nameSubmit = document.getElementById("nameSubmit");
     var toastContainer = document.getElementById("toastContainer");
-    var exportBtn = document.getElementById("exportBtn");
+    var exportTxtBtn = document.getElementById("exportTxtBtn");
+    var exportDocxBtn = document.getElementById("exportDocxBtn");
+    var exportPdfBtn = document.getElementById("exportPdfBtn");
     var typingBar = document.getElementById("typingBar");
     var typingText = document.getElementById("typingText");
     var shareBtn = document.getElementById("shareBtn");
-    var newRoomBtn = document.getElementById("newRoomBtn");
-    var roomChip = document.getElementById("roomChip");
-    var writeModeBtn = document.getElementById("writeModeBtn");
-    var previewModeBtn = document.getElementById("previewModeBtn");
-    var previewPane = document.getElementById("preview");
-    var pageEl = document.querySelector(".page");
+    var newDocBtn = document.getElementById("newDocBtn");
+    var offlineTestBtn = document.getElementById("offlineTestBtn");
+    var docTitleInput = document.getElementById("docTitle");
 
     // --- Identity ---
     var userID = "U-" + Math.random().toString(36).substring(2, 6).toUpperCase();
@@ -59,6 +58,7 @@
     var reconnectAttempts = 0;
     var reconnectTimer = null;
     var pendingRestore = false;
+    var manualOfflineMode = false;
 
     var urlParams = new URLSearchParams(location.search);
     var docID = urlParams.get("doc_id") || urlParams.get("doc") || "";
@@ -315,8 +315,7 @@
 
     // --- Old Value Tracking ---
     var oldValue = "";
-    var currentMode = "write";
-    var markdownConfigured = false;
+    var titleSaveTimer = null;
 
     // --- Activity Panel ---
     activityBtn.addEventListener("click", function() {
@@ -329,39 +328,16 @@
         });
     }
 
-    if (newRoomBtn) {
-        newRoomBtn.addEventListener("click", function() {
-            createPrivateRoom();
+    if (newDocBtn) {
+        newDocBtn.addEventListener("click", function() {
+            createNewDocument();
         });
     }
 
-    if (writeModeBtn) {
-        writeModeBtn.addEventListener("click", function() {
-            setMode("write");
+    if (offlineTestBtn) {
+        offlineTestBtn.addEventListener("click", function() {
+            toggleOfflineTestMode();
         });
-    }
-
-    if (previewModeBtn) {
-        previewModeBtn.addEventListener("click", function() {
-            setMode("preview");
-        });
-    }
-
-    function generateRoomID() {
-        var raw = Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
-        return "room-" + raw;
-    }
-
-    function syncRoomURL(room) {
-        var url = new URL(window.location.href);
-        url.searchParams.set("doc_id", room);
-        history.replaceState({}, "", url.toString());
-    }
-
-    function updateRoomChip() {
-        if (!roomChip) return;
-        roomChip.textContent = "Room: " + docID;
-        roomChip.title = "Current room: " + docID;
     }
 
     function getShareURL() {
@@ -397,7 +373,7 @@
         document.body.removeChild(temp);
     }
 
-    function createPrivateRoom() {
+    function createNewDocument() {
         fetch("/api/docs", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -415,54 +391,6 @@
         .catch(function() {
             showToast("⚠️", "Could not create document");
         });
-    }
-
-    function setMode(mode) {
-        currentMode = mode === "preview" ? "preview" : "write";
-        var isPreview = currentMode === "preview";
-        if (pageEl) {
-            pageEl.classList.toggle("preview-mode", isPreview);
-        }
-        if (writeModeBtn) writeModeBtn.classList.toggle("active", !isPreview);
-        if (previewModeBtn) previewModeBtn.classList.toggle("active", isPreview);
-        if (isPreview) {
-            renderPreview();
-        } else {
-            editor.focus();
-        }
-    }
-
-    function renderPreview() {
-        if (!previewPane) return;
-        var source = editor.value || "";
-        if (window.marked && typeof window.marked.parse === "function") {
-            if (!markdownConfigured && window.hljs) {
-                window.marked.setOptions({
-                    breaks: true,
-                    highlight: function(code, lang) {
-                        if (lang && window.hljs.getLanguage(lang)) {
-                            return window.hljs.highlight(code, { language: lang }).value;
-                        }
-                        return window.hljs.highlightAuto(code).value;
-                    }
-                });
-                markdownConfigured = true;
-            }
-            var rawHtml = window.marked.parse(source);
-            if (window.DOMPurify && typeof window.DOMPurify.sanitize === "function") {
-                previewPane.innerHTML = window.DOMPurify.sanitize(rawHtml);
-            } else {
-                previewPane.innerHTML = "<pre>" + escapeHtml(source) + "</pre>";
-            }
-            if (window.hljs) {
-                var codeBlocks = previewPane.querySelectorAll("pre code");
-                for (var c = 0; c < codeBlocks.length; c++) {
-                    window.hljs.highlightElement(codeBlocks[c]);
-                }
-            }
-        } else {
-            previewPane.innerHTML = "<pre>" + escapeHtml(source) + "</pre>";
-        }
     }
 
     // ==========================================
@@ -515,7 +443,11 @@
             stopHealthCheck();
             addLog("System", "Connection lost — edits saved locally");
             showToast("🔴", "Connection lost — working offline");
-            scheduleReconnect();
+            if (!manualOfflineMode) {
+                scheduleReconnect();
+            } else {
+                statusText.textContent = "Offline Test Mode";
+            }
         };
 
         ws.onerror = function(event) {
@@ -808,6 +740,7 @@
     }
 
     function scheduleReconnect() {
+        if (manualOfflineMode) return;
         stopHealthCheck();
         if (reconnectTimer) clearTimeout(reconnectTimer);
         reconnectAttempts++;
@@ -1193,9 +1126,6 @@
         var words = editor.value.trim() ? editor.value.trim().split(/\s+/).length : 0;
         var bufferInfo = offlineBuffer.length > 0 ? " | " + offlineBuffer.length + " buffered" : "";
         charCountEl.textContent = count + " chars · " + words + " words" + bufferInfo;
-        if (currentMode === "preview") {
-            renderPreview();
-        }
     }
 
     function setAIStatus(type, msg) {
@@ -1203,30 +1133,202 @@
         aiBadge.className = "ai-badge " + type;
     }
 
+    function sanitizeFilename(name) {
+        var trimmed = (name || "").trim() || "document";
+        return trimmed.replace(/[\\/:*?"<>|]+/g, "-").replace(/\s+/g, " ").substring(0, 80);
+    }
+
+    function getCurrentTitle() {
+        return (docTitleInput && docTitleInput.value.trim()) || "Untitled Document";
+    }
+
+    function toggleOfflineTestMode() {
+        manualOfflineMode = !manualOfflineMode;
+        if (offlineTestBtn) {
+            offlineTestBtn.classList.toggle("active", manualOfflineMode);
+            offlineTestBtn.textContent = manualOfflineMode ? "✅ Resume Sync" : "📶 Offline Test";
+        }
+
+        if (manualOfflineMode) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.close();
+            }
+            showToast("🧪", "Offline test mode on — keep typing, then resume sync");
+            addLog("System", "Offline test mode enabled");
+            statusText.textContent = "Offline Test Mode";
+        } else {
+            showToast("🟢", "Resuming live sync");
+            addLog("System", "Offline test mode disabled");
+            reconnectAttempts = 0;
+            connect();
+        }
+    }
+
+    function loadDocumentMeta() {
+        fetch("/api/docs/" + encodeURIComponent(docID))
+            .then(function(res) {
+                if (!res.ok) throw new Error("meta fetch failed");
+                return res.json();
+            })
+            .then(function(data) {
+                var title = (data && data.document && data.document.title) ? String(data.document.title) : "Untitled Document";
+                if (docTitleInput) {
+                    docTitleInput.value = title;
+                }
+                document.title = title + " — SyncWave";
+            })
+            .catch(function() {
+                document.title = "SyncWave — Editor";
+            });
+    }
+
+    function saveDocumentTitle() {
+        var nextTitle = getCurrentTitle();
+        document.title = nextTitle + " — SyncWave";
+        fetch("/api/docs/" + encodeURIComponent(docID), {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title: nextTitle })
+        })
+        .then(function(res) {
+            if (!res.ok) throw new Error("save title failed");
+            return res.json();
+        })
+        .then(function(data) {
+            var savedTitle = (data && data.document && data.document.title) ? String(data.document.title) : nextTitle;
+            if (docTitleInput) {
+                docTitleInput.value = savedTitle;
+            }
+            document.title = savedTitle + " — SyncWave";
+        })
+        .catch(function() {
+            showToast("⚠️", "Could not save document title");
+        });
+    }
+
+    function wireDocumentTitleInput() {
+        if (!docTitleInput) return;
+        docTitleInput.addEventListener("input", function() {
+            var liveTitle = getCurrentTitle();
+            document.title = liveTitle + " — SyncWave";
+            if (titleSaveTimer) clearTimeout(titleSaveTimer);
+            titleSaveTimer = setTimeout(function() {
+                saveDocumentTitle();
+            }, 600);
+        });
+        docTitleInput.addEventListener("blur", function() {
+            if (titleSaveTimer) {
+                clearTimeout(titleSaveTimer);
+                titleSaveTimer = null;
+            }
+            saveDocumentTitle();
+        });
+    }
+
     // --- Export Document ---
-    exportBtn.addEventListener("click", function() {
-        var text = editor.value;
-        if (!text) { showToast("⚠️", "Document is empty"); return; }
-        var blob = new Blob([text], { type: "text/plain" });
-        var url = URL.createObjectURL(blob);
-        var a = document.createElement("a");
-        a.href = url;
-        a.download = (document.getElementById("docTitle").value || "document") + ".txt";
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-        showToast("✅", "Document exported");
-        addLog("System", "Document exported");
-    });
+    if (exportTxtBtn) {
+        exportTxtBtn.addEventListener("click", function() {
+            var text = editor.value;
+            if (!text) { showToast("⚠️", "Document is empty"); return; }
+            var blob = new Blob([text], { type: "text/plain" });
+            var url = URL.createObjectURL(blob);
+            var a = document.createElement("a");
+            a.href = url;
+            a.download = sanitizeFilename(getCurrentTitle()) + ".txt";
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            showToast("✅", "TXT exported");
+            addLog("System", "Document exported as TXT");
+        });
+    }
+
+    if (exportDocxBtn) {
+        exportDocxBtn.addEventListener("click", function() {
+            var text = editor.value;
+            if (!text) { showToast("⚠️", "Document is empty"); return; }
+            if (!window.docx || !window.saveAs) {
+                showToast("⚠️", "DOCX export unavailable");
+                return;
+            }
+
+            var lines = text.split(/\r?\n/);
+            var paragraphs = [];
+            for (var i = 0; i < lines.length; i++) {
+                paragraphs.push(new window.docx.Paragraph({ text: lines[i] }));
+            }
+
+            var doc = new window.docx.Document({
+                sections: [{ properties: {}, children: paragraphs }]
+            });
+
+            window.docx.Packer.toBlob(doc).then(function(blob) {
+                window.saveAs(blob, sanitizeFilename(getCurrentTitle()) + ".docx");
+                showToast("✅", "DOCX exported");
+                addLog("System", "Document exported as DOCX");
+            }).catch(function() {
+                showToast("⚠️", "DOCX export failed");
+            });
+        });
+    }
+
+    if (exportPdfBtn) {
+        exportPdfBtn.addEventListener("click", function() {
+            var text = editor.value;
+            if (!text) { showToast("⚠️", "Document is empty"); return; }
+            if (!window.jspdf || !window.jspdf.jsPDF) {
+                showToast("⚠️", "PDF export unavailable");
+                return;
+            }
+
+            try {
+                var pdf = new window.jspdf.jsPDF({ unit: "pt", format: "a4" });
+                var margin = 48;
+                var maxWidth = 595 - margin * 2;
+                var lines = pdf.splitTextToSize(text, maxWidth);
+                var y = margin;
+                var lineHeight = 16;
+
+                pdf.setFont("helvetica", "normal");
+                pdf.setFontSize(11);
+
+                for (var li = 0; li < lines.length; li++) {
+                    if (y > 820) {
+                        pdf.addPage();
+                        y = margin;
+                    }
+                    pdf.text(lines[li], margin, y);
+                    y += lineHeight;
+                }
+
+                pdf.save(sanitizeFilename(getCurrentTitle()) + ".pdf");
+                showToast("✅", "PDF exported");
+                addLog("System", "Document exported as PDF");
+            } catch (_) {
+                showToast("⚠️", "PDF export failed");
+            }
+        });
+    }
+
+    function showOfflineTestTips() {
+        showToast("🧪", "Offline test: open this doc on phone + laptop, disable one side, edit both, then reconnect");
+        addLog("System", "Offline test: disable sync on one device, type on both, then resume sync to verify merge");
+    }
+
+    if (offlineTestBtn) {
+        offlineTestBtn.addEventListener("dblclick", function() {
+            showOfflineTestTips();
+        });
+    }
 
     // --- Init ---
     function initApp() {
         oldValue = editor.value;
-        updateRoomChip();
-        setMode("write");
         setAIStatus("ready", "✨ AI Ready");
+        loadDocumentMeta();
+        wireDocumentTitleInput();
         connect();
-        addLog("System", "Private room active: " + docID);
+        addLog("System", "Document active: " + docID);
     }
 })();
