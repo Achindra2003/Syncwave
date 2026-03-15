@@ -458,9 +458,6 @@
         ws.onclose = function(event) {
             console.log("[SyncWave] WebSocket closed:", event.code, event.reason);
             addLog("System", "WS closed: code=" + event.code);
-            if (connected) {
-                lastSyncedContent = editor.value;
-            }
             connected = false;
             wasDisconnected = true;
             pendingRestore = false;
@@ -672,6 +669,7 @@
                                 }
                             }
                         }
+                        lastSyncedContent = editor.value;
                         break;
                     }
                     isRemoteUpdate = true;
@@ -692,6 +690,7 @@
                     editor.selectionEnd = (insPos <= se) ? se + 1 : se;
 
                     oldValue = editor.value;
+                    lastSyncedContent = editor.value;
                     updateCharCount();
                     clearSuggestion();
                     isRemoteUpdate = false;
@@ -699,7 +698,10 @@
 
                 case "delete":
                     if (pendingRestore) break;
-                    if (msg.userID === effectiveUserID) break;
+                    if (msg.userID === effectiveUserID) {
+                        lastSyncedContent = editor.value;
+                        break;
+                    }
                     isRemoteUpdate = true;
                     var dpos = (msg.position != null) ? msg.position : -1;
                     if (dpos >= 0 && dpos < editor.value.length) {
@@ -715,6 +717,7 @@
                         editor.selectionEnd = (dpos < dse) ? dse - 1 : dse;
                     }
                     oldValue = editor.value;
+                    lastSyncedContent = editor.value;
                     updateCharCount();
                     clearSuggestion();
                     isRemoteUpdate = false;
