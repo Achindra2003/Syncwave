@@ -66,7 +66,7 @@ SyncWave/
 
 | Layer | Technology |
 |---|---|
-| Backend | Go 1.22, `gorilla/websocket`, `log/slog` |
+| Backend | Go 1.24, `gorilla/websocket`, `log/slog` |
 | Frontend | Vanilla JS, CSS3 |
 | AI | Groq API via `langchaingo` (OpenAI-compatible) |
 | Protocol | JSON over WebSocket + SSE for AI streaming |
@@ -113,7 +113,7 @@ Current MVP env vars used by the server:
 PORT=8080
 LOG_LEVEL=info
 GROQ_API_KEY=your-key
-SQLITE_PATH=data/syncwave.db
+DATABASE_URL=postgres://postgres:password@db.your-project-ref.supabase.co:5432/postgres?sslmode=require
 ```
 
 ### Run
@@ -155,7 +155,7 @@ docker run -p 8080:8080 -e GROQ_API_KEY=your_key syncwave
 1. Push to GitHub
 2. Create a **Web Service** on [Render](https://render.com) pointing to the repo
 3. Set **Build Command**: (auto-detected from Dockerfile)
-4. Set **Environment Variable**: `GROQ_API_KEY`
+4. Set **Environment Variables**: `DATABASE_URL` (required), `GROQ_API_KEY` (optional)
 5. Deploy — Render auto-detects the Dockerfile
 
 ### Demo: Offline Sync

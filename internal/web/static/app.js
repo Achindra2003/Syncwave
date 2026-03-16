@@ -316,6 +316,8 @@
     // --- Old Value Tracking ---
     var oldValue = "";
     var titleSaveTimer = null;
+    var titleMetaLoaded = false;
+    var lastSavedTitle = "";
 
     // --- Activity Panel ---
     activityBtn.addEventListener("click", function() {
@@ -1175,15 +1177,21 @@
                 if (docTitleInput) {
                     docTitleInput.value = title;
                 }
+                lastSavedTitle = title;
+                titleMetaLoaded = true;
                 document.title = title + " — SyncWave";
             })
             .catch(function() {
+                titleMetaLoaded = true;
+                lastSavedTitle = getCurrentTitle();
                 document.title = "SyncWave — Editor";
             });
     }
 
     function saveDocumentTitle() {
+        if (!titleMetaLoaded) return;
         var nextTitle = getCurrentTitle();
+        if (nextTitle === lastSavedTitle) return;
         document.title = nextTitle + " — SyncWave";
         fetch("/api/docs/" + encodeURIComponent(docID), {
             method: "PATCH",
@@ -1199,6 +1207,7 @@
             if (docTitleInput) {
                 docTitleInput.value = savedTitle;
             }
+            lastSavedTitle = savedTitle;
             document.title = savedTitle + " — SyncWave";
         })
         .catch(function() {

@@ -4,12 +4,10 @@ import (
 	"database/sql"
 	"fmt"
 	"math/rand"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 type Doc struct {
@@ -22,18 +20,20 @@ type Service struct {
 	db *sql.DB
 }
 
-func NewSQLiteService(dbPath string) (*Service, error) {
-	if dbPath == "" {
-		dbPath = filepath.Join("data", "syncwave.db")
+func NewPostgresService(databaseURL string) (*Service, error) {
+	dsn := strings.TrimSpace(databaseURL)
+	if dsn == "" {
+		return nil, fmt.Errorf("database URL is required")
 	}
 
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
-		return nil, fmt.Errorf("create sqlite directory: %w", err)
-	}
-
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("pgx", dsn)
 	if err != nil {
-		return nil, fmt.Errorf("open sqlite database: %w", err)
+		return nil, fmt.Errorf("open postgres database: %w", err)
+	}
+
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("ping postgres database: %w", err)
 	}
 
 	s := &Service{db: db}
@@ -51,9 +51,9 @@ CREATE TABLE IF NOT EXISTS documents (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
     content TEXT NOT NULL DEFAULT '',
-    seq_num INTEGER NOT NULL DEFAULT 0,
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    seq_num BIGINT NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_documents_updated_at
@@ -61,7 +61,7 @@ ON documents(updated_at DESC);
 `
 
 	if _, err := s.db.Exec(query); err != nil {
-		return fmt.Errorf("init sqlite schema: %w", err)
+		return fmt.Errorf("init postgres schema: %w", err)
 	}
 	return nil
 }
@@ -74,7 +74,7 @@ func (s *Service) CreateDocument(title string) (Doc, error) {
 
 	id := generateDocID()
 	if _, err := s.db.Exec(
-		`INSERT INTO documents(id, title, content, seq_num) VALUES(?, ?, '', 0)`,
+		`INSERT INTO documents(id, title, content, seq_num) VALUES($1, $2, '', 0)`,
 		id,
 		normalizedTitle,
 	); err != nil {
@@ -87,7 +87,7 @@ func (s *Service) CreateDocument(title string) (Doc, error) {
 func (s *Service) GetDocument(docID string) (Doc, error) {
 	var doc Doc
 	err := s.db.QueryRow(
-		`SELECT id, title, COALESCE(updated_at, CURRENT_TIMESTAMP) FROM documents WHERE id = ?`,
+		`SELECT id, title, COALESCE(updated_at::text, NOW()::text) FROM documents WHERE id = $1`,
 		docID,
 	).Scan(&doc.ID, &doc.Title, &doc.UpdatedAt)
 	if err != nil {
@@ -104,8 +104,8 @@ func (s *Service) UpdateDocumentTitle(docID string, title string) (Doc, error) {
 
 	res, err := s.db.Exec(
 		`UPDATE documents
-         SET title = ?, updated_at = CURRENT_TIMESTAMP
-         WHERE id = ?`,
+         SET title = $1, updated_at = NOW()
+         WHERE id = $2`,
 		normalizedTitle,
 		docID,
 	)
@@ -127,10 +127,10 @@ func (s *Service) ListDocuments(limit int) ([]Doc, error) {
 	}
 
 	rows, err := s.db.Query(
-		`SELECT id, title, COALESCE(updated_at, CURRENT_TIMESTAMP)
+		`SELECT id, title, COALESCE(updated_at::text, NOW()::text)
          FROM documents
          ORDER BY updated_at DESC
-         LIMIT ?`,
+         LIMIT $1`,
 		limit,
 	)
 	if err != nil {
@@ -161,7 +161,9 @@ func (s *Service) EnsureDocument(docID string, title string) error {
 	}
 
 	_, err := s.db.Exec(
-		`INSERT OR IGNORE INTO documents(id, title, content, seq_num) VALUES(?, ?, '', 0)`,
+		`INSERT INTO documents(id, title, content, seq_num)
+         VALUES($1, $2, '', 0)
+         ON CONFLICT (id) DO NOTHING`,
 		docID,
 		normalizedTitle,
 	)
@@ -177,7 +179,7 @@ func (s *Service) LoadStateOrCreate(docID string) (content string, seq int, err 
 	}
 
 	err = s.db.QueryRow(
-		`SELECT content, seq_num FROM documents WHERE id = ?`,
+		`SELECT content, seq_num FROM documents WHERE id = $1`,
 		docID,
 	).Scan(&content, &seq)
 	if err != nil {
@@ -190,8 +192,8 @@ func (s *Service) LoadStateOrCreate(docID string) (content string, seq int, err 
 func (s *Service) SaveState(docID string, content string, seq int) error {
 	_, err := s.db.Exec(
 		`UPDATE documents
-         SET content = ?, seq_num = ?, updated_at = CURRENT_TIMESTAMP
-         WHERE id = ?`,
+         SET content = $1, seq_num = $2, updated_at = NOW()
+         WHERE id = $3`,
 		content,
 		seq,
 		docID,
@@ -204,10 +206,10 @@ func (s *Service) SaveState(docID string, content string, seq int) error {
 
 func generateDocID() string {
 	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
-	rand.Seed(time.Now().UnixNano())
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	b := make([]byte, 10)
 	for i := range b {
-		b[i] = alphabet[rand.Intn(len(alphabet))]
+		b[i] = alphabet[rng.Intn(len(alphabet))]
 	}
 	return "doc-" + string(b)
 }

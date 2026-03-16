@@ -37,9 +37,9 @@ func main() {
 	h := hub.NewHub(logger)
 	h.ConfigureAllowedOrigins(cfg.AllowedOrigins)
 
-	docService, err := docs.NewSQLiteService(cfg.SQLitePath)
+	docService, err := docs.NewPostgresService(cfg.DatabaseURL)
 	if err != nil {
-		logger.Error("failed to initialize SQLite service", "error", err)
+		logger.Error("failed to initialize Postgres service", "error", err)
 		os.Exit(1)
 	}
 

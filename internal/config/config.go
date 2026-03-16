@@ -16,10 +16,9 @@ import (
 // Config holds all application configuration values.
 type Config struct {
 	Port           string            // HTTP server port (default: "8080")
-	SQLitePath     string            // SQLite database path (default: data/syncwave.db)
+	DatabaseURL    string            // PostgreSQL DSN (required for persistent storage)
 	GroqAPIKey     string            // API key for Groq LLM service
 	LogLevel       slog.Level        // Logging verbosity (info or debug)
-	DatabaseURL    string            // PostgreSQL DSN (optional)
 	SnapshotEvery  int               // Persist snapshot every N ops (default: 25)
 	AuthSecret     string            // Secret for signed websocket sessions (optional)
 	SessionTTLMin  int               // Session token TTL in minutes (default: 480)
@@ -76,10 +75,9 @@ func Load() *Config {
 
 	return &Config{
 		Port:           port,
-		SQLitePath:     getOrDefault("SQLITE_PATH", "data/syncwave.db"),
+		DatabaseURL:    os.Getenv("DATABASE_URL"),
 		GroqAPIKey:     os.Getenv("GROQ_API_KEY"),
 		LogLevel:       level,
-		DatabaseURL:    os.Getenv("DATABASE_URL"),
 		SnapshotEvery:  snapshotEvery,
 		AuthSecret:     os.Getenv("AUTH_SECRET"),
 		SessionTTLMin:  sessionTTLMin,
