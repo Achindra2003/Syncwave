@@ -62,8 +62,10 @@ func RegisterRoutes(mux *http.ServeMux, h *hub.Hub, assistant *ai.Assistant, doc
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
-	mux.HandleFunc("/api/docs", handleDocs(docService))
-	mux.HandleFunc("/api/docs/", handleDocByID(docService))
+	limiter := NewRateLimiter()
+
+	mux.HandleFunc("/api/docs", limiter.LimitMiddleware(handleDocs(docService)))
+	mux.HandleFunc("/api/docs/", limiter.LimitMiddleware(handleDocByID(docService)))
 
 	mux.HandleFunc("/api/auth/register", handleRegister(docService))
 	mux.HandleFunc("/api/auth/login", handleLogin(docService))

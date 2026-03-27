@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"syncwave/internal/ai"
+	"syncwave/internal/analytics"
 	"syncwave/internal/config"
 	"syncwave/internal/docs"
 	"syncwave/internal/hub"
@@ -43,11 +44,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Initialize Advanced Features: Analytics Worker Pool
+	pool := analytics.NewWorkerPool(100)
+	pool.Start(3) // 3 background workers
+	defer pool.Stop()
+
+	// Make the hub aware of the background pool so document actions can trigger analytics
 	h.SetPersistence(
 		func(docID string) (string, int, error) {
 			return docService.LoadStateOrCreate(docID)
 		},
 		func(docID string, content string, seq int) error {
+			// Trigger analytics job asynchronously
+			pool.Submit(content)
 			return docService.SaveState(docID, content, seq)
 		},
 	)
