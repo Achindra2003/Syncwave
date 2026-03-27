@@ -210,6 +210,23 @@ func (h *Hub) removeRoomIfEmpty(docID string, expected *Room) {
 	}
 }
 
+// BroadcastToRoom sends a raw JSON byte slice to all connected clients in a specific room.
+func (h *Hub) BroadcastToRoom(docID string, message []byte) {
+	h.mu.Lock()
+	room, exists := h.rooms[docID]
+	h.mu.Unlock()
+
+	if !exists {
+		return
+	}
+
+	room.mu.Lock()
+	defer room.mu.Unlock()
+	for _, cc := range room.clients {
+		cc.safeSend(message)
+	}
+}
+
 func (r *Room) getUsers() []User {
 	users := make([]User, 0, len(r.clients))
 	for _, cc := range r.clients {

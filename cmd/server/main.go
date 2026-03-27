@@ -45,7 +45,7 @@ func main() {
 	}
 
 	// Initialize Advanced Features: Analytics Worker Pool
-	pool := analytics.NewWorkerPool(100)
+	pool := analytics.NewWorkerPool(100, h)
 	pool.Start(3) // 3 background workers
 	defer pool.Stop()
 
@@ -56,7 +56,7 @@ func main() {
 		},
 		func(docID string, content string, seq int) error {
 			// Trigger analytics job asynchronously
-			pool.Submit(content)
+			pool.Submit(docID, content)
 			return docService.SaveState(docID, content, seq)
 		},
 	)

@@ -1,25 +1,33 @@
 package analytics
 
 import (
+	"fmt"
 	"log"
 	"sync"
 )
 
+type HubBroadcaster interface {
+	BroadcastToRoom(docID string, message []byte)
+}
+
 // Job represents a background task for the worker pool.
 type Job struct {
-	Text string
+	DocID string
+	Text  string
 }
 
 // WorkerPool manages a pool of goroutines for processing analytics.
 type WorkerPool struct {
 	jobs chan Job
 	wg   sync.WaitGroup
+	hub  HubBroadcaster
 }
 
 // NewWorkerPool initializes the channel.
-func NewWorkerPool(bufferSize int) *WorkerPool {
+func NewWorkerPool(bufferSize int, hub HubBroadcaster) *WorkerPool {
 	return &WorkerPool{
 		jobs: make(chan Job, bufferSize),
+		hub:  hub,
 	}
 }
 
@@ -42,12 +50,17 @@ func (p *WorkerPool) worker(id int) {
 
 		log.Printf("[Analytics Worker #%d] Score: %.2f | Words: %d | Sentences: %d",
 			id, result.ReadingScore, result.WordCount, result.SentenceCount)
+
+		if p.hub != nil {
+			msg := fmt.Sprintf(`{"type":"activity","payload":"[Analytics Engine] Document Scanned - Readability Score: %.2f (Words: %d)"}`, result.ReadingScore, result.WordCount)
+			p.hub.BroadcastToRoom(job.DocID, []byte(msg))
+		}
 	}
 }
 
 // Submit enqueues a new job onto the unbuffered/buffered channel.
-func (p *WorkerPool) Submit(text string) {
-	p.jobs <- Job{Text: text}
+func (p *WorkerPool) Submit(docID, text string) {
+	p.jobs <- Job{DocID: docID, Text: text}
 }
 
 // Stop closes the channel and safely waits for all workers to complete in-flight jobs.

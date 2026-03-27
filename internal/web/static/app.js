@@ -737,6 +737,16 @@
                         handleTypingIndicator(msg.userName);
                     }
                     break;
+
+                case "activity":
+                    if (msg.payload) {
+                        addLog("AI", msg.payload);
+                        // Also show a toast if they don't have the panel open
+                        if (!activityPanel.classList.contains("open")) {
+                            showToast("📈", "New Analytics Update");
+                        }
+                    }
+                    break;
             }
         };
     }
