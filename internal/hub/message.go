@@ -34,7 +34,7 @@ type Message struct {
 	TargetID        *crdt.OpID  `json:"targetID,omitempty"` // delete: character to tombstone
 	NewID           *crdt.OpID  `json:"newID,omitempty"`    // server-assigned OpID for inserts
 	ClientOpID      string      `json:"clientOpID,omitempty"`
-	NodeIDs         []crdt.OpID `json:"nodeIDs,omitempty"`  // full_sync: ordered visible node IDs
+	NodeIDs         []crdt.OpID `json:"nodeIDs,omitempty"` // full_sync: ordered visible node IDs
 }
 
 // User represents a connected collaborator.

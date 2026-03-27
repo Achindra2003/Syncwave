@@ -92,17 +92,36 @@
 </head>
 <body>
     <div class="shell">
-        <div class="hero">
-            <h1>SyncWave Documents</h1>
-            <p>Create a document, then share the link to collaborate in real time with CRDT sync and AI assistance.</p>
+        <div class="header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px;">
+            <div class="hero" style="margin-bottom: 0;">
+                <h1>SyncWave Documents</h1>
+                <p>Create a document, then share the link to collaborate in real time with CRDT sync and AI assistance.</p>
+            </div>
+            
+            <div class="auth-controls" id="authSection" style="display: flex; gap: 10px;">
+                <input type="text" id="usernameInput" placeholder="Username" style="min-width: 120px;" />
+                <input type="password" id="passwordInput" placeholder="Password" style="min-width: 120px;" />
+                <button class="primary" id="loginBtn" style="background: rgba(124,92,255,0.15); border: 1px solid rgba(124,92,255,0.35); color: var(--text);">Login</button>
+                <button class="primary" id="registerBtn">Register</button>
+            </div>
+            
+            <div id="loggedInSection" style="display: none; align-items: center; gap: 14px;">
+                <span style="color: var(--muted);">Welcome, <strong id="displayUsername" style="color: var(--accent);"></strong></span>
+                <button class="link-btn" id="logoutBtn" style="padding: 6px 12px; font-size: 0.85rem;">Logout</button>
+            </div>
         </div>
 
-        <div class="card">
+        <div class="card" id="documentCard" style="display: none;">
             <div class="controls">
                 <input id="titleInput" placeholder="Untitled Document" maxlength="120" />
                 <button class="primary" id="createBtn">Create New Document</button>
             </div>
             <div id="docsList"></div>
+        </div>
+        
+        <div class="card" id="loginPromptCard" style="text-align: center; padding: 40px;">
+            <h3 style="margin-top:0;">Please Register or Login to access documents.</h3>
+            <p style="color: var(--muted); margin-bottom: 0;">Use the form in the top right to authenticate using securely hashed credentials.</p>
         </div>
     </div>
 
@@ -111,6 +130,106 @@
         const createBtn = document.getElementById('createBtn');
         const titleInput = document.getElementById('titleInput');
         const docsList = document.getElementById('docsList');
+        
+        // Auth Elements
+        const authSection = document.getElementById('authSection');
+        const loggedInSection = document.getElementById('loggedInSection');
+        const loginBtn = document.getElementById('loginBtn');
+        const registerBtn = document.getElementById('registerBtn');
+        const logoutBtn = document.getElementById('logoutBtn');
+        const usernameInput = document.getElementById('usernameInput');
+        const passwordInput = document.getElementById('passwordInput');
+        const displayUsername = document.getElementById('displayUsername');
+        const documentCard = document.getElementById('documentCard');
+        const loginPromptCard = document.getElementById('loginPromptCard');
+
+        // Initial Auth State Check
+        let currentUser = sessionStorage.getItem('syncwave_user');
+        
+        function updateUIState() {
+            if (currentUser) {
+                authSection.style.display = 'none';
+                loggedInSection.style.display = 'flex';
+                displayUsername.textContent = currentUser;
+                documentCard.style.display = 'block';
+                loginPromptCard.style.display = 'none';
+                refresh(); // Load documents only if logged in
+            } else {
+                authSection.style.display = 'flex';
+                loggedInSection.style.display = 'none';
+                documentCard.style.display = 'none';
+                loginPromptCard.style.display = 'block';
+                usernameInput.value = '';
+                passwordInput.value = '';
+            }
+        }
+
+        async function handleRegister() {
+            const username = usernameInput.value.trim();
+            const password = passwordInput.value;
+            
+            if (!username || !password) return alert("Please enter both username and password");
+            
+            try {
+                registerBtn.disabled = true;
+                const res = await fetch('/api/auth/register', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+                
+                const data = await res.json();
+                
+                if (!res.ok) {
+                    throw new Error(data.error || 'Registration failed');
+                }
+                
+                alert("Registered successfully! You can now log in.");
+                
+            } catch (err) {
+                alert(err.message);
+            } finally {
+                registerBtn.disabled = false;
+            }
+        }
+
+        async function handleLogin() {
+            const username = usernameInput.value.trim();
+            const password = passwordInput.value;
+            
+            if (!username || !password) return alert("Please enter both username and password");
+            
+            try {
+                loginBtn.disabled = true;
+                const res = await fetch('/api/auth/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+                
+                const data = await res.json();
+                
+                if (!res.ok) {
+                    throw new Error(data.error || 'Login failed');
+                }
+                
+                // Set fake session state for frontend only MVP
+                sessionStorage.setItem('syncwave_user', username);
+                currentUser = username;
+                updateUIState();
+                
+            } catch (err) {
+                alert(err.message);
+            } finally {
+                loginBtn.disabled = false;
+            }
+        }
+        
+        function handleLogout() {
+            sessionStorage.removeItem('syncwave_user');
+            currentUser = null;
+            updateUIState();
+        }
 
         async function fetchDocs() {
             const res = await fetch('/api/docs?limit=50');
@@ -157,6 +276,7 @@
         }
 
         async function refresh() {
+            if (!currentUser) return;
             try {
                 const data = await fetchDocs();
                 renderDocs((data && data.documents) || []);
@@ -189,8 +309,16 @@
         titleInput.addEventListener('keydown', function (e) {
             if (e.key === 'Enter') createDoc();
         });
+        
+        loginBtn.addEventListener('click', handleLogin);
+        registerBtn.addEventListener('click', handleRegister);
+        logoutBtn.addEventListener('click', handleLogout);
+        passwordInput.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter') handleLogin();
+        });
 
-        refresh();
+        // Initialize UI
+        updateUIState();
     })();
     </script>
 </body>

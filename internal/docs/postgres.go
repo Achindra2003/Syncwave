@@ -47,6 +47,13 @@ func NewPostgresService(databaseURL string) (*Service, error) {
 
 func (s *Service) initSchema() error {
 	query := `
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    username TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS documents (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
@@ -212,4 +219,34 @@ func generateDocID() string {
 		b[i] = alphabet[rng.Intn(len(alphabet))]
 	}
 	return "doc-" + string(b)
+}
+
+func (s *Service) RegisterUser(username, passwordHash string) error {
+	id := generateDocID() // Reuse generator for simplicity
+	_, err := s.db.Exec(
+		`INSERT INTO users(id, username, password_hash) VALUES($1, $2, $3)`,
+		id, username, passwordHash,
+	)
+	if err != nil {
+		if strings.Contains(err.Error(), "duplicate key value") {
+			return fmt.Errorf("username already exists")
+		}
+		return fmt.Errorf("register user: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) GetUserHash(username string) (string, error) {
+	var hash string
+	err := s.db.QueryRow(
+		`SELECT password_hash FROM users WHERE username = $1`,
+		username,
+	).Scan(&hash)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", fmt.Errorf("user not found")
+		}
+		return "", fmt.Errorf("get user hash: %w", err)
+	}
+	return hash, nil
 }

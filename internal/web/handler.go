@@ -13,6 +13,8 @@ import (
 	"syncwave/internal/ai"
 	"syncwave/internal/docs"
 	"syncwave/internal/hub"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 //go:embed static
@@ -33,6 +35,8 @@ type documentService interface {
 	ListDocuments(limit int) ([]docs.Doc, error)
 	GetDocument(docID string) (docs.Doc, error)
 	UpdateDocumentTitle(docID string, title string) (docs.Doc, error)
+	RegisterUser(username, passwordHash string) error
+	GetUserHash(username string) (string, error)
 }
 
 func RegisterRoutes(mux *http.ServeMux, h *hub.Hub, assistant *ai.Assistant, docService documentService) {
@@ -60,6 +64,9 @@ func RegisterRoutes(mux *http.ServeMux, h *hub.Hub, assistant *ai.Assistant, doc
 	})
 	mux.HandleFunc("/api/docs", handleDocs(docService))
 	mux.HandleFunc("/api/docs/", handleDocByID(docService))
+
+	mux.HandleFunc("/api/auth/register", handleRegister(docService))
+	mux.HandleFunc("/api/auth/login", handleLogin(docService))
 
 	mux.HandleFunc("/ws", h.ServeWS)
 	var c completer
@@ -271,4 +278,83 @@ func writeSSE(w http.ResponseWriter, flusher http.Flusher, data string) error {
 	}
 	flusher.Flush()
 	return nil
+}
+
+func handleRegister(docService documentService) http.HandlerFunc {
+	type registerReq struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+		var req registerReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"Invalid request"}`, http.StatusBadRequest)
+			return
+		}
+		if req.Username == "" || req.Password == "" {
+			http.Error(w, `{"error":"Username and password required"}`, http.StatusBadRequest)
+			return
+		}
+
+		// bcrypt hashing for credential handling (security)
+		hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+		if err != nil {
+			http.Error(w, `{"error":"Failed to hash password"}`, http.StatusInternalServerError)
+			return
+		}
+
+		err = docService.RegisterUser(req.Username, string(hash))
+		if err != nil {
+			if strings.Contains(err.Error(), "already exists") {
+				http.Error(w, `{"error":"Username taken"}`, http.StatusConflict)
+				return
+			}
+			http.Error(w, `{"error":"Internal error"}`, http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(`{"status":"success","message":"user registered"}`))
+	}
+}
+
+func handleLogin(docService documentService) http.HandlerFunc {
+	type loginReq struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req loginReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"Invalid request"}`, http.StatusBadRequest)
+			return
+		}
+
+		hash, err := docService.GetUserHash(req.Username)
+		if err != nil {
+			// Always return generic unauthorized to prevent user enumeration
+			http.Error(w, `{"error":"Invalid credentials"}`, http.StatusUnauthorized)
+			return
+		}
+
+		// Verify using bcrypt
+		err = bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Password))
+		if err != nil {
+			http.Error(w, `{"error":"Invalid credentials"}`, http.StatusUnauthorized)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"success","message":"logged in successfully"}`))
+	}
 }

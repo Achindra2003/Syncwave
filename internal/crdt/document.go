@@ -240,4 +240,3 @@ func (d *Document) GetVisibleNodeIDs() []OpID {
 	}
 	return ids
 }
-
